@@ -2,6 +2,7 @@ using HarmonyLib;
 using JetBrains.Annotations;
 using RimWorld.IO;
 using UnityEngine;
+using Verse;
 
 namespace GraphicSetter.Patches;
 
