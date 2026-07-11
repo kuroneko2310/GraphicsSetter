@@ -40,17 +40,17 @@ internal static class TextureLoadingPatch
 
             try
             {
-                bool hasMipMapsSet;
-                bool loadedFromCache = TextureBlobCache.TryLoad(file, out texture2D, out hasMipMapsSet);
+                bool rawMipDataFinalized;
+                bool loadedFromCache = TextureBlobCache.TryLoad(file, out texture2D, out rawMipDataFinalized);
                 if (loadedFromCache)
-                    hasMipMapsSet = true;
+                    rawMipDataFinalized = true;
 
                 bool loadedFromDds = false;
                 if (!loadedFromCache)
                 {
-                    hasMipMapsSet = false;
+                    rawMipDataFinalized = false;
                     loadedFromDds = settings.enableDDSLoading
-                                    && DDSHelper.TryLoadDDS(file, ref hasMipMapsSet, ref texture2D);
+                                    && DDSHelper.TryLoadDDS(file, ref rawMipDataFinalized, ref texture2D);
                 }
 
                 if (!texture2D && file.Exists)
@@ -61,11 +61,15 @@ internal static class TextureLoadingPatch
                         generateMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, width, height);
 
                     texture2D = new Texture2D(2, 2, TextureFormat.Alpha8, generateMipMaps);
-                    texture2D.LoadImage(data);
-                    hasMipMapsSet = !generateMipMaps;
+                    if (!texture2D.LoadImage(data))
+                    {
+                        Object.DestroyImmediate(texture2D);
+                        texture2D = null;
+                        return false;
+                    }
 
-                    if (FixMipMapsIfNeeded(ref texture2D, data, file))
-                        hasMipMapsSet = true;
+                    // LoadImage has populated the base level. Apply below may build the requested mip chain.
+                    rawMipDataFinalized = !generateMipMaps;
                 }
 
                 if (!texture2D)
@@ -80,9 +84,9 @@ internal static class TextureLoadingPatch
                     bool generateResizedMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, texture2D.width,
                         texture2D.height);
                     if (TextureResizer.TryResize(ref texture2D, maxDimension, generateResizedMipMaps))
-                        hasMipMapsSet = true;
+                        rawMipDataFinalized = true;
 
-                    if (!loadedFromDds && Prefs.TextureCompression)
+                    if (!loadedFromDds && Prefs.TextureCompression && CanCompressSafely(file, texture2D))
                         texture2D.Compress(true);
                 }
 
@@ -90,7 +94,7 @@ internal static class TextureLoadingPatch
                 if (settings.overrideMipMapBias)
                     texture2D.mipMapBias = settings.mipMapBias;
 
-                texture2D.Apply(!hasMipMapsSet, false);
+                texture2D.Apply(!rawMipDataFinalized, false);
                 if (!loadedFromCache)
                     TextureBlobCache.TryStore(file, texture2D);
                 if (!readable)
@@ -111,33 +115,20 @@ internal static class TextureLoadingPatch
         }
     }
 
-    private static bool FixMipMapsIfNeeded(ref Texture2D texture2D, byte[] data, VirtualFile file)
+    private static bool CanCompressSafely(VirtualFile file, Texture2D texture)
     {
-        if (!CheckMipMapFix(texture2D, file))
+        if (!texture || TexturePolicy.IsDataTexture(file))
             return false;
 
-        Object.DestroyImmediate(texture2D);
-        texture2D = new Texture2D(2, 2, TextureFormat.Alpha8, false);
-        texture2D.LoadImage(data);
-        return true;
+        bool blockAligned = texture.width >= 4 && texture.height >= 4
+                            && (texture.width & 3) == 0
+                            && (texture.height & 3) == 0;
+        if (!blockAligned && (GraphicsSettings.mainSettings.verboseLogging || Prefs.LogVerbose))
+        {
+            Log.Message($"[Graphics Settings] Keeping '{file.Name}' uncompressed because its "
+                        + $"{texture.width}x{texture.height} dimensions are not BC block-aligned.");
+        }
+
+        return blockAligned;
     }
-
-    public static bool CheckMipMapFix(Texture2D texture2D, VirtualFile file)
-    {
-        bool needsFix = NeedsMipMapFix(texture2D);
-        if (needsFix)
-            LogMipMapWarning(texture2D, file);
-        return needsFix;
-    }
-
-    private static void LogMipMapWarning(Texture2D texture2D, VirtualFile file)
-    {
-        if (!Prefs.LogVerbose && !GraphicsSettings.mainSettings.verboseLogging)
-            return;
-
-        Log.Warning($"Texture does not support mipmapping, dimensions must be divisible by 4 ({texture2D.width}x{texture2D.height}) for '{file.Name}'");
-    }
-
-    private static bool NeedsMipMapFix(Texture2D texture2D)
-        => ((texture2D.width & 3) != 0) | ((texture2D.height & 3) != 0);
 }
