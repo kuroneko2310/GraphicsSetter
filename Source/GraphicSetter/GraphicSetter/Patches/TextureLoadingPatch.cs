@@ -16,49 +16,68 @@ internal static class TextureLoadingPatch
         [UsedImplicitly]
         public static bool Prefix(VirtualFile file, ref Texture2D __result)
         {
-            __result = CustomLoad(file);
+            if (!TryCustomLoad(file, out var texture))
+                return true;
+
+            __result = texture;
             return false;
         }
 
         public static Texture2D CustomLoad(VirtualFile file, bool readable = false)
         {
-            Texture2D texture2D = null;
-            var settings = GraphicsSettings.mainSettings;
+            TryCustomLoad(file, out var texture, readable);
+            return texture;
+        }
+
+        public static bool TryCustomLoad(VirtualFile file, out Texture2D texture2D, bool readable = false)
+        {
+            texture2D = null;
+            if (file == null)
+                return false;
+
+            var settings = GraphicsSettings.mainSettings ?? new SettingsGroup();
+
             try
             {
                 var hasMipMapsSet = false;
-                var loadedFromDds = DDSHelper.TryLoadDDS(file, ref hasMipMapsSet, ref texture2D);
+                var loadedFromDds = settings.enableDDSLoading
+                    && DDSHelper.TryLoadDDS(file, ref hasMipMapsSet, ref texture2D);
 
                 if (!texture2D && file.Exists)
                 {
                     var data = file.ReadAllBytes();
-                    texture2D = new(2, 2, TextureFormat.Alpha8, true /*settings.useMipMap*/);
-                    texture2D.LoadImage(data);
+                    texture2D = new Texture2D(2, 2, TextureFormat.Alpha8, true);
+                    if (!texture2D.LoadImage(data))
+                        throw new InvalidDataException($"Unity could not decode texture at '{file.FullPath}'.");
+
                     hasMipMapsSet = FixMipMapsIfNeeded(ref texture2D, data, file);
                 }
 
                 if (!texture2D)
-                    throw new($"Could not load texture at '{file.FullPath}'.");
+                    throw new InvalidDataException($"Could not load texture at '{file.FullPath}'.");
 
                 if (!loadedFromDds && Prefs.TextureCompression)
                     texture2D.Compress(true);
 
                 texture2D.name = Path.GetFileNameWithoutExtension(file.Name);
                 texture2D.filterMode = FilterMode.Trilinear;
-                
                 texture2D.anisoLevel = 1;
-                // 2 or higher is impossible to display with rimworld's orthographic camera.
-                // Planets are loaded from asset bundles
-                
-                texture2D.mipMapBias = settings.mipMapBias;
+
+                if (settings.overrideMipMapBias)
+                    texture2D.mipMapBias = settings.mipMapBias;
+
                 texture2D.Apply(!hasMipMapsSet, !readable);
+                return true;
             }
             catch (Exception exception)
             {
-                Log.Error($"[Graphics Settings][{(file?.Name ?? "Missing File...")}] {exception}");
-            }
+                if (texture2D)
+                    UnityEngine.Object.DestroyImmediate(texture2D);
 
-            return texture2D;
+                texture2D = null;
+                Log.Warning($"[Graphics Settings][{file.Name}] Custom texture loading failed; falling back to RimWorld's loader.\n{exception}");
+                return false;
+            }
         }
     }
 
@@ -69,8 +88,10 @@ internal static class TextureLoadingPatch
 
         UnityEngine.Object.DestroyImmediate(texture2D);
 
-        texture2D = new(2, 2, TextureFormat.Alpha8, false);
-        texture2D.LoadImage(data);
+        texture2D = new Texture2D(2, 2, TextureFormat.Alpha8, false);
+        if (!texture2D.LoadImage(data))
+            throw new InvalidDataException($"Unity could not decode non-mipmapped texture at '{file.FullPath}'.");
+
         return true;
     }
 
@@ -93,6 +114,5 @@ internal static class TextureLoadingPatch
     }
 
     private static bool NeedsMipMapFix(Texture2D texture2D)
-        => /*GraphicsSettings.mainSettings.useMipMap
-            &&*/ (((texture2D.width & 3) != 0) | ((texture2D.height & 3) != 0));
+        => ((texture2D.width & 3) != 0) | ((texture2D.height & 3) != 0);
 }
