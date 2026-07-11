@@ -23,8 +23,6 @@ internal static class TextureLoadingPatch
                 return false;
             }
 
-            // The custom loader is an optimization, not a hard dependency. If it cannot
-            // safely produce a texture, let RimWorld's original loader handle the file.
             return true;
         }
 
@@ -37,15 +35,21 @@ internal static class TextureLoadingPatch
         {
             texture2D = null;
             SettingsGroup settings = GraphicsSettings.mainSettings;
-
             if (file == null)
                 return false;
 
             try
             {
-                bool hasMipMapsSet = false;
-                bool loadedFromDds = settings.enableDDSLoading
-                                     && DDSHelper.TryLoadDDS(file, ref hasMipMapsSet, ref texture2D);
+                bool hasMipMapsSet;
+                bool loadedFromCache = TextureBlobCache.TryLoad(file, out texture2D, out hasMipMapsSet);
+                bool loadedFromDds = false;
+
+                if (!loadedFromCache)
+                {
+                    hasMipMapsSet = false;
+                    loadedFromDds = settings.enableDDSLoading
+                                    && DDSHelper.TryLoadDDS(file, ref hasMipMapsSet, ref texture2D);
+                }
 
                 if (!texture2D && file.Exists)
                 {
@@ -68,19 +72,29 @@ internal static class TextureLoadingPatch
                 texture2D.name = Path.GetFileNameWithoutExtension(file.Name);
                 texture2D.anisoLevel = 1;
 
-                int maxDimension = TexturePolicy.ResolveMaxTextureDimension(file);
-                bool generateResizedMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, texture2D.width, texture2D.height);
-                if (TextureResizer.TryResize(ref texture2D, maxDimension, generateResizedMipMaps))
-                    hasMipMapsSet = true;
+                if (!loadedFromCache)
+                {
+                    int maxDimension = TexturePolicy.ResolveMaxTextureDimension(file);
+                    bool generateResizedMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, texture2D.width,
+                        texture2D.height);
+                    if (TextureResizer.TryResize(ref texture2D, maxDimension, generateResizedMipMaps))
+                        hasMipMapsSet = true;
 
-                if (!loadedFromDds && Prefs.TextureCompression)
-                    texture2D.Compress(true);
+                    if (!loadedFromDds && Prefs.TextureCompression)
+                        texture2D.Compress(true);
+                }
 
                 texture2D.filterMode = texture2D.mipmapCount > 1 ? FilterMode.Trilinear : FilterMode.Bilinear;
                 if (settings.overrideMipMapBias)
                     texture2D.mipMapBias = settings.mipMapBias;
 
-                texture2D.Apply(!hasMipMapsSet, !readable);
+                // Keep the texture readable until the finalized GPU-ready bytes have been cached.
+                texture2D.Apply(!hasMipMapsSet, false);
+                if (!loadedFromCache)
+                    TextureBlobCache.TryStore(file, texture2D);
+                if (!readable)
+                    texture2D.Apply(false, true);
+
                 return true;
             }
             catch (Exception exception)
@@ -112,7 +126,6 @@ internal static class TextureLoadingPatch
         bool needsFix = NeedsMipMapFix(texture2D);
         if (needsFix)
             LogMipMapWarning(texture2D, file);
-
         return needsFix;
     }
 
