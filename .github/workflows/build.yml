@@ -9,14 +9,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
-      - name: Restore
-        run: dotnet restore Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --verbosity quiet
-      - name: Build
+          show-progress: false
+      - name: Restore and build
         shell: pwsh
         run: |
+          dotnet restore Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --verbosity quiet *> restore.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content restore.log | Select-String -Pattern 'error|failed' -CaseSensitive:$false
+            exit $LASTEXITCODE
+          }
           dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --no-restore --nologo --verbosity quiet /clp:ErrorsOnly *> build.log
           $exitCode = $LASTEXITCODE
           Get-Content build.log | Select-String -Pattern ': error '
