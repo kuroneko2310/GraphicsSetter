@@ -1,14 +1,13 @@
-﻿using System;
+using System;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Text;
 using UnityEngine;
-using Verse;
 
 namespace GraphicSetter;
 
-// DDS importing based on // https://github.com/sarbian/DDSLoader/blob/master/DatabaseLoaderTexture_DDS.cs
+// DDS importing based on https://github.com/sarbian/DDSLoader/blob/master/DatabaseLoaderTexture_DDS.cs
 public static class DDSLoader
 {
     private const uint DDSD_MIPMAPCOUNT_BIT = 0x00020000;
@@ -16,247 +15,318 @@ public static class DDSLoader
     private const uint DDPF_ALPHA = 0x00000002;
     private const uint DDPF_FOURCC = 0x00000004;
     private const uint DDPF_RGB = 0x00000040;
-    private const uint DDPF_YUV = 0x00000200;
     private const uint DDPF_LUMINANCE = 0x00020000;
-    private const uint DDPF_NORMAL = 0x80000000;
 
+    private const uint D3D10ResourceDimensionTexture2D = 3;
+    private const uint D3D11ResourceMiscTextureCube = 0x4;
+
+    private const uint DxgiBc1Unorm = 71;
+    private const uint DxgiBc1UnormSrgb = 72;
+    private const uint DxgiBc3Unorm = 77;
+    private const uint DxgiBc3UnormSrgb = 78;
+    private const uint DxgiBc7Unorm = 98;
+    private const uint DxgiBc7UnormSrgb = 99;
+
+    [ThreadStatic]
     public static string error;
 
-    // DDS Texture loader inspired by
-    // http://answers.unity3d.com/questions/555984/can-you-load-dds-textures-during-runtime.html#answer-707772
-    // http://msdn.microsoft.com/en-us/library/bb943992.aspx
-    // http://msdn.microsoft.com/en-us/library/windows/desktop/bb205578(v=vs.85).aspx
-    // mipmapBias limits the number of mipmap when > 0
     public static Texture2D LoadDDS(string path, out bool hasMipMaps, bool skipFileCheck = false)
     {
+        error = null;
         hasMipMaps = false;
-        
+
         if (!skipFileCheck && !File.Exists(path))
         {
             error = "File does not exist";
             return null;
         }
 
-        using var memory = new MemoryMappedFileSpanWrapper(OpenExistingMmf(path), MemoryMappedFileAccess.Read);
+        using MemoryMappedFileSpanWrapper memory =
+            new(OpenExistingMmf(path), MemoryMappedFileAccess.Read);
+        Span<byte> span = memory.GetSpan(0L);
+        int index = 0;
 
-        var span = memory.GetSpan(0L);
-        var index = 0;
-
-        var dwMagic = ReadBytes(span, 4, ref index);
-
+        Span<byte> magicBytes = ReadBytes(span, 4, ref index);
         Span<char> fourCC = stackalloc char[4];
-        Encoding.ASCII.GetChars(dwMagic, fourCC);
+        Encoding.ASCII.GetChars(magicBytes, fourCC);
 
         if (!FourCcEquals(fourCC, "DDS "))
         {
-            var dwMagicArray = dwMagic.ToArray();
-            error = $"Invalid DDS file. File header starting with '{
-                string.Join("", dwMagicArray.Select(static b => (char)b))}' ({
-                    BitConverter.ToString(dwMagicArray)}) instead of 'DDS '.";
-
+            byte[] magicArray = magicBytes.ToArray();
+            error = $"Invalid DDS file. Header starts with '{string.Join("", magicArray.Select(static b => (char)b))}' ({BitConverter.ToString(magicArray)}) instead of 'DDS '.";
             return null;
         }
 
-        var dwSize = ReadUInt32(span, ref index);
-
-        // this header byte should be 124 for DDS image files
-        if (dwSize != 124u)
+        uint headerSize = ReadUInt32(span, ref index);
+        if (headerSize != 124u)
         {
-            error = $"Invalid header size. Expected 124, got {dwSize}";
+            error = $"Invalid header size. Expected 124, got {headerSize}";
             return null;
         }
 
-        var dwFlags = ReadUInt32(span, ref index);
-        var dwHeight = ReadUInt32(span, ref index);
-        var dwWidth = ReadUInt32(span, ref index);
+        uint flags = ReadUInt32(span, ref index);
+        uint height = ReadUInt32(span, ref index);
+        uint width = ReadUInt32(span, ref index);
+        ReadUInt32(span, ref index); // pitch or linear size
+        ReadUInt32(span, ref index); // depth
+        uint mipMapCount = ReadUInt32(span, ref index);
 
-        var dwPitchOrLinearSize = ReadUInt32(span, ref index);
-        var dwDepth = ReadUInt32(span, ref index);
-        var dwMipMapCount = ReadUInt32(span, ref index);
+        if (width == 0 || height == 0)
+        {
+            error = $"Invalid DDS dimensions {width}x{height}";
+            return null;
+        }
 
-        if ((dwFlags & DDSD_MIPMAPCOUNT_BIT) == 0)
-            dwMipMapCount = 1;
+        if ((flags & DDSD_MIPMAPCOUNT_BIT) == 0 || mipMapCount == 0)
+            mipMapCount = 1;
 
-        // dwReserved1
-        for (var i = 0; i < 11; i++)
-            index += sizeof(uint); // ReadUInt32(span, ref index);
+        for (int i = 0; i < 11; i++)
+            ReadUInt32(span, ref index);
 
-        // DDS_PIXELFORMAT
-        var dds_pxlf_dwSize = ReadUInt32(span, ref index);
-        var dds_pxlf_dwFlags = ReadUInt32(span, ref index);
-        
-        var dds_pxlf_dwFourCC = ReadBytes(span, 4, ref index);
-        
-        Encoding.ASCII.GetChars(dds_pxlf_dwFourCC, fourCC);
-        
-        var dds_pxlf_dwRGBBitCount = ReadUInt32(span, ref index);
-        var pixelSize = dds_pxlf_dwRGBBitCount / 8;
-        var dds_pxlf_dwRBitMask = ReadUInt32(span, ref index);
-        var dds_pxlf_dwGBitMask = ReadUInt32(span, ref index);
-        var dds_pxlf_dwBBitMask = ReadUInt32(span, ref index);
-        var dds_pxlf_dwABitMask = ReadUInt32(span, ref index);
+        uint pixelFormatSize = ReadUInt32(span, ref index);
+        if (pixelFormatSize != 32u)
+        {
+            error = $"Invalid DDS pixel format header size. Expected 32, got {pixelFormatSize}";
+            return null;
+        }
 
-        // var dwCaps = ReadUInt32(span, ref index);
-        // var dwCaps2 = ReadUInt32(span, ref index);
-        // var dwCaps3 = ReadUInt32(span, ref index);
-        // var dwCaps4 = ReadUInt32(span, ref index);
-        // var dwReserved2 = ReadUInt32(span, ref index);
+        uint pixelFlags = ReadUInt32(span, ref index);
+        Span<byte> pixelFourCcBytes = ReadBytes(span, 4, ref index);
+        Encoding.ASCII.GetChars(pixelFourCcBytes, fourCC);
 
+        uint rgbBitCount = ReadUInt32(span, ref index);
+        uint pixelSize = rgbBitCount / 8;
+        uint redMask = ReadUInt32(span, ref index);
+        uint greenMask = ReadUInt32(span, ref index);
+        uint blueMask = ReadUInt32(span, ref index);
+        uint alphaMask = ReadUInt32(span, ref index);
+
+        // DDS caps and reserved value.
+        ReadUInt32(span, ref index);
+        ReadUInt32(span, ref index);
+        ReadUInt32(span, ref index);
+        ReadUInt32(span, ref index);
+        ReadUInt32(span, ref index);
+
+        bool fourcc = (pixelFlags & DDPF_FOURCC) != 0;
+        bool compressed = false;
+        bool bgr888 = redMask == 0x00ff0000 && greenMask == 0x0000ff00 && blueMask == 0x000000ff;
         TextureFormat textureFormat;
-        var isCompressed = false;
-        // var isNormalMap = (dds_pxlf_dwFlags & DDPF_NORMAL) != 0;
-
-        var fourcc = (dds_pxlf_dwFlags & DDPF_FOURCC) != 0;
-
-        var bgr888 = dds_pxlf_dwRBitMask == 0x00ff0000
-            && dds_pxlf_dwGBitMask == 0x0000ff00
-            && dds_pxlf_dwBBitMask == 0x000000ff;
 
         if (fourcc)
         {
-            // Texture dos not contain RGB data, check FourCC for format
-            isCompressed = true;
-
-            textureFormat = FourCcEquals(fourCC, "DXT1") ? TextureFormat.DXT1
-                : FourCcEquals(fourCC, "DXT5") ? TextureFormat.DXT5
-                : FourCcEquals(fourCC, "DX10") ? TextureFormat.BC7
-                : default;
+            compressed = true;
+            if (FourCcEquals(fourCC, "DXT1"))
+            {
+                textureFormat = TextureFormat.DXT1;
+            }
+            else if (FourCcEquals(fourCC, "DXT5"))
+            {
+                textureFormat = TextureFormat.DXT5;
+            }
+            else if (FourCcEquals(fourCC, "DX10"))
+            {
+                if (!TryReadDx10Header(span, ref index, out textureFormat))
+                    return null;
+            }
+            else
+            {
+                error = $"Unsupported DDS FourCC '{new string(fourCC)}'";
+                return null;
+            }
         }
         else
         {
-            var alpha = (dds_pxlf_dwFlags & DDPF_ALPHA) != 0;
-            var rgb = (dds_pxlf_dwFlags & DDPF_RGB) != 0;
-            var alphapixel = (dds_pxlf_dwFlags & DDPF_ALPHAPIXELS) != 0;
-            var luminance = (dds_pxlf_dwFlags & DDPF_LUMINANCE) != 0;
-            
-            var rgb888 = dds_pxlf_dwRBitMask == 0x000000ff
-                && dds_pxlf_dwGBitMask == 0x0000ff00
-                && dds_pxlf_dwBBitMask == 0x00ff0000;
+            bool alpha = (pixelFlags & DDPF_ALPHA) != 0;
+            bool rgb = (pixelFlags & DDPF_RGB) != 0;
+            bool alphaPixel = (pixelFlags & DDPF_ALPHAPIXELS) != 0;
+            bool luminance = (pixelFlags & DDPF_LUMINANCE) != 0;
 
-            var rgb565 = dds_pxlf_dwRBitMask == 0x0000F800
-                && dds_pxlf_dwGBitMask == 0x000007E0
-                && dds_pxlf_dwBBitMask == 0x0000001F;
+            bool rgb888 = redMask == 0x000000ff && greenMask == 0x0000ff00 && blueMask == 0x00ff0000;
+            bool rgb565 = redMask == 0x0000F800 && greenMask == 0x000007E0 && blueMask == 0x0000001F;
+            bool argb4444 = alphaMask == 0x0000f000 && redMask == 0x00000f00 && greenMask == 0x000000f0 && blueMask == 0x0000000f;
+            bool rgba4444 = alphaMask == 0x0000000f && redMask == 0x0000f000 && greenMask == 0x000000f0 && blueMask == 0x00000f00;
 
-            var argb4444 = dds_pxlf_dwABitMask == 0x0000f000
-                && dds_pxlf_dwRBitMask == 0x00000f00
-                && dds_pxlf_dwGBitMask == 0x000000f0
-                && dds_pxlf_dwBBitMask == 0x0000000f;
-
-            var rbga4444 = dds_pxlf_dwABitMask == 0x0000000f
-                && dds_pxlf_dwRBitMask == 0x0000f000
-                && dds_pxlf_dwGBitMask == 0x000000f0
-                && dds_pxlf_dwBBitMask == 0x00000f00;
-            
-            textureFormat = rgb switch
+            if (rgb && (rgb888 || bgr888))
+                textureFormat = alphaPixel ? TextureFormat.RGBA32 : TextureFormat.RGB24;
+            else if (rgb && rgb565)
+                textureFormat = TextureFormat.RGB565;
+            else if (rgb && alphaPixel && argb4444)
+                textureFormat = TextureFormat.ARGB4444;
+            else if (rgb && alphaPixel && rgba4444)
+                textureFormat = TextureFormat.RGBA4444;
+            else if (!rgb && alpha != luminance)
+                textureFormat = TextureFormat.Alpha8;
+            else
             {
-                true when (rgb888 || bgr888) // RGB or RGBA format
-                    => alphapixel ? TextureFormat.RGBA32 : TextureFormat.RGB24,
-                true when rgb565 // Nvidia texconv B5G6R5_UNORM
-                    => TextureFormat.RGB565,
-                true when alphapixel && argb4444 // Nvidia texconv B4G4R4A4_UNORM
-                    => TextureFormat.ARGB4444,
-                true when alphapixel && rbga4444 => TextureFormat.RGBA4444,
-                false when alpha != luminance // A8 format or Luminance 8
-                    => TextureFormat.Alpha8,
-                _ => default
-            };
-        }
-
-        if (textureFormat == default)
-        {
-            error
-                = "Only BC7, DXT1, DXT5, A8, RGB24, BGR24, RGBA32, BGRA32, RGB565, ARGB4444 and RGBA4444 are supported";
-            
-            return null;
-        }
-
-        var dataBias = textureFormat != TextureFormat.BC7 ? 128 : 148;
-        
-        var dxtBytes = span[dataBias..];
-
-        // Swap red and blue.
-        if (!isCompressed && bgr888)
-        {
-            dxtBytes = dxtBytes.ToArray(); // dxtBytes otherwise pointing at readonly storage
-
-            for (var i = 0; i + 2 < dxtBytes.Length; i += (int)pixelSize)
-            {
-                var b = dxtBytes[i + 0];
-                var r = dxtBytes[i + 2];
-
-                dxtBytes[i + 0] = r;
-                dxtBytes[i + 2] = b;
+                error = "Unsupported uncompressed DDS pixel layout";
+                return null;
             }
         }
 
-        // no longer works as of unity 2022.3.35. The bug is still there tho
-        // // Work around for a >Unity< Bug.
-        // // if QualitySettings.masterTextureLimit != 0 (half or quarter texture rez)
-        // // and dwWidth and dwHeight divided by 2 (or 4 for quarter rez) are not a multiple of 4, 
-        // // and we are creating a DXT5 or DXT1 texture
-        // // Then you get a Unity error on the "new Texture"
-        //
-        // var quality = QualitySettings.globalTextureMipmapLimit;
-        //
-        // // If the bug conditions are present then switch to full quality
-        // if (isCompressed && quality > 0 && ((dwWidth & 3) != 0 || (dwHeight & 3) != 0))
-        //     QualitySettings.globalTextureMipmapLimit = 0;
-
-        if (isCompressed && ((dwWidth & 3) != 0 || (dwHeight & 3) != 0))
+        if (compressed && ((width & 3) != 0 || (height & 3) != 0))
         {
-            error = $"Cannot load compressed texture with non multiple of 4 dimensions of {dwWidth}x{
-                dwHeight} and format {textureFormat}";
-            
+            error = $"Cannot load compressed texture with non-multiple-of-4 dimensions {width}x{height} and format {textureFormat}";
             return null;
+        }
+
+        int payloadOffset = index;
+        long requiredBytes = CalculateRequiredPayloadBytes(textureFormat, width, height, mipMapCount, pixelSize);
+        if (requiredBytes <= 0 || requiredBytes > int.MaxValue)
+        {
+            error = $"Invalid DDS payload size {requiredBytes} bytes";
+            return null;
+        }
+
+        if (payloadOffset < 0 || payloadOffset > span.Length || span.Length - payloadOffset < requiredBytes)
+        {
+            error = $"Truncated DDS payload. Expected at least {requiredBytes} bytes, found {Math.Max(0, span.Length - payloadOffset)}";
+            return null;
+        }
+
+        Span<byte> textureBytes = span.Slice(payloadOffset, (int)requiredBytes);
+
+        if (!compressed && bgr888)
+        {
+            if (pixelSize < 3)
+            {
+                error = $"Invalid BGR pixel size {pixelSize}";
+                return null;
+            }
+
+            textureBytes = textureBytes.ToArray();
+            for (int i = 0; i + 2 < textureBytes.Length; i += (int)pixelSize)
+            {
+                byte blue = textureBytes[i];
+                textureBytes[i] = textureBytes[i + 2];
+                textureBytes[i + 2] = blue;
+            }
         }
 
         try
         {
-            var texture = new Texture2D((int)dwWidth, (int)dwHeight, textureFormat,
-                hasMipMaps = (int)dwMipMapCount > 1);
-
+            Texture2D texture = new((int)width, (int)height, textureFormat, hasMipMaps = mipMapCount > 1);
             unsafe
             {
-                fixed (byte* pData = &dxtBytes[0])
-                    texture.LoadRawTextureData((IntPtr)pData, dxtBytes.Length);
+                fixed (byte* dataPointer = &textureBytes[0])
+                    texture.LoadRawTextureData((IntPtr)dataPointer, textureBytes.Length);
             }
 
             return texture;
         }
         catch (Exception exception)
         {
-            error = $"Exception loading texture with format '{textureFormat}', width '{
-                dwWidth}', height '{dwHeight}', mipCount '{dwMipMapCount}':\n{exception}";
+            error = $"Exception loading texture with format '{textureFormat}', width '{width}', height '{height}', mipCount '{mipMapCount}':\n{exception}";
+            return null;
         }
-        // finally
-        // {
-        //     QualitySettings.globalTextureMipmapLimit = quality;
-        // }
-        
-        return null;
     }
 
-    private static bool FourCcEquals(Span<char> bytes, string s) => bytes.SequenceEqual(s);
+    private static bool TryReadDx10Header(Span<byte> bytes, ref int index, out TextureFormat textureFormat)
+    {
+        textureFormat = default;
+        uint dxgiFormat = ReadUInt32(bytes, ref index);
+        uint resourceDimension = ReadUInt32(bytes, ref index);
+        uint miscFlag = ReadUInt32(bytes, ref index);
+        uint arraySize = ReadUInt32(bytes, ref index);
+        ReadUInt32(bytes, ref index); // misc flags 2 / alpha mode
+
+        if (resourceDimension != D3D10ResourceDimensionTexture2D || arraySize != 1 ||
+            (miscFlag & D3D11ResourceMiscTextureCube) != 0)
+        {
+            error = $"Unsupported DX10 DDS resource: dimension={resourceDimension}, arraySize={arraySize}, miscFlag={miscFlag}";
+            return false;
+        }
+
+        switch (dxgiFormat)
+        {
+            case DxgiBc1Unorm:
+            case DxgiBc1UnormSrgb:
+                textureFormat = TextureFormat.DXT1;
+                return true;
+            case DxgiBc3Unorm:
+            case DxgiBc3UnormSrgb:
+                textureFormat = TextureFormat.DXT5;
+                return true;
+            case DxgiBc7Unorm:
+            case DxgiBc7UnormSrgb:
+                textureFormat = TextureFormat.BC7;
+                return true;
+            default:
+                error = $"Unsupported DX10 DDS format DXGI_FORMAT={dxgiFormat}. Supported: BC1, BC3 and BC7.";
+                return false;
+        }
+    }
+
+    private static long CalculateRequiredPayloadBytes(TextureFormat format, uint width, uint height, uint mipCount,
+        uint declaredPixelSize)
+    {
+        int blockBytes = format switch
+        {
+            TextureFormat.DXT1 => 8,
+            TextureFormat.DXT5 or TextureFormat.BC7 => 16,
+            _ => 0
+        };
+
+        int bytesPerPixel = format switch
+        {
+            TextureFormat.Alpha8 => 1,
+            TextureFormat.RGB24 => 3,
+            TextureFormat.RGBA32 => 4,
+            TextureFormat.RGB565 or TextureFormat.ARGB4444 or TextureFormat.RGBA4444 => 2,
+            _ => (int)declaredPixelSize
+        };
+
+        long total = 0;
+        uint currentWidth = width;
+        uint currentHeight = height;
+        for (uint mip = 0; mip < Math.Max(1u, mipCount); mip++)
+        {
+            if (blockBytes > 0)
+            {
+                long blocksWide = Math.Max(1, (currentWidth + 3) / 4);
+                long blocksHigh = Math.Max(1, (currentHeight + 3) / 4);
+                total += blocksWide * blocksHigh * blockBytes;
+            }
+            else
+            {
+                if (bytesPerPixel <= 0)
+                    return -1;
+                total += (long)currentWidth * currentHeight * bytesPerPixel;
+            }
+
+            currentWidth = Math.Max(1u, currentWidth >> 1);
+            currentHeight = Math.Max(1u, currentHeight >> 1);
+        }
+
+        return total;
+    }
+
+    private static bool FourCcEquals(Span<char> bytes, string value) => bytes.SequenceEqual(value);
 
     private static uint ReadUInt32(Span<byte> bytes, ref int index)
     {
-        var result = BitConverter.ToUInt32(bytes.Slice(index, sizeof(uint)));
+        if (index < 0 || index > bytes.Length - sizeof(uint))
+            throw new EndOfStreamException("Unexpected end of DDS header");
+
+        uint result = BitConverter.ToUInt32(bytes.Slice(index, sizeof(uint)));
         index += sizeof(uint);
         return result;
     }
 
     private static Span<byte> ReadBytes(Span<byte> bytes, int count, ref int index)
     {
-        var result = bytes.Slice(index, count);
+        if (count < 0 || index < 0 || index > bytes.Length - count)
+            throw new EndOfStreamException("Unexpected end of DDS header");
+
+        Span<byte> result = bytes.Slice(index, count);
         index += count;
         return result;
     }
 
     private static (MemoryMappedFile file, long length) OpenExistingMmf(string path)
     {
-        var info = new FileInfo(path);
-        var length = info.Length;
-
+        FileInfo info = new(path);
+        long length = info.Length;
         return (MemoryMappedFile.CreateFromFile(info.FullName, FileMode.Open, null, length,
             MemoryMappedFileAccess.Read), length);
     }
