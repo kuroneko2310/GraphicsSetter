@@ -67,8 +67,8 @@ public static class DDSLoader
         uint flags = ReadUInt32(span, ref index);
         uint height = ReadUInt32(span, ref index);
         uint width = ReadUInt32(span, ref index);
-        ReadUInt32(span, ref index); // pitch or linear size
-        ReadUInt32(span, ref index); // depth
+        ReadUInt32(span, ref index);
+        ReadUInt32(span, ref index);
         uint mipMapCount = ReadUInt32(span, ref index);
 
         if (width == 0 || height == 0)
@@ -101,7 +101,6 @@ public static class DDSLoader
         uint blueMask = ReadUInt32(span, ref index);
         uint alphaMask = ReadUInt32(span, ref index);
 
-        // DDS caps and reserved value.
         ReadUInt32(span, ref index);
         ReadUInt32(span, ref index);
         ReadUInt32(span, ref index);
@@ -117,13 +116,9 @@ public static class DDSLoader
         {
             compressed = true;
             if (FourCcEquals(fourCC, "DXT1"))
-            {
                 textureFormat = TextureFormat.DXT1;
-            }
             else if (FourCcEquals(fourCC, "DXT5"))
-            {
                 textureFormat = TextureFormat.DXT5;
-            }
             else if (FourCcEquals(fourCC, "DX10"))
             {
                 if (!TryReadDx10Header(span, ref index, out textureFormat))
@@ -131,7 +126,7 @@ public static class DDSLoader
             }
             else
             {
-                error = $"Unsupported DDS FourCC '{new string(fourCC)}'";
+                error = $"Unsupported DDS FourCC '{new string(fourCC.ToArray())}'";
                 return null;
             }
         }
@@ -185,7 +180,6 @@ public static class DDSLoader
         }
 
         Span<byte> textureBytes = span.Slice(payloadOffset, (int)requiredBytes);
-
         if (!compressed && bgr888)
         {
             if (pixelSize < 3)
@@ -211,7 +205,6 @@ public static class DDSLoader
                 fixed (byte* dataPointer = &textureBytes[0])
                     texture.LoadRawTextureData((IntPtr)dataPointer, textureBytes.Length);
             }
-
             return texture;
         }
         catch (Exception exception)
@@ -228,7 +221,7 @@ public static class DDSLoader
         uint resourceDimension = ReadUInt32(bytes, ref index);
         uint miscFlag = ReadUInt32(bytes, ref index);
         uint arraySize = ReadUInt32(bytes, ref index);
-        ReadUInt32(bytes, ref index); // misc flags 2 / alpha mode
+        ReadUInt32(bytes, ref index);
 
         if (resourceDimension != D3D10ResourceDimensionTexture2D || arraySize != 1 ||
             (miscFlag & D3D11ResourceMiscTextureCube) != 0)
@@ -279,12 +272,13 @@ public static class DDSLoader
         long total = 0;
         uint currentWidth = width;
         uint currentHeight = height;
-        for (uint mip = 0; mip < Math.Max(1u, mipCount); mip++)
+        uint effectiveMipCount = mipCount == 0 ? 1u : mipCount;
+        for (uint mip = 0; mip < effectiveMipCount; mip++)
         {
             if (blockBytes > 0)
             {
-                long blocksWide = Math.Max(1, (currentWidth + 3) / 4);
-                long blocksHigh = Math.Max(1, (currentHeight + 3) / 4);
+                long blocksWide = Math.Max(1L, (long)(currentWidth + 3u) / 4L);
+                long blocksHigh = Math.Max(1L, (long)(currentHeight + 3u) / 4L);
                 total += blocksWide * blocksHigh * blockBytes;
             }
             else
@@ -294,8 +288,8 @@ public static class DDSLoader
                 total += (long)currentWidth * currentHeight * bytesPerPixel;
             }
 
-            currentWidth = Math.Max(1u, currentWidth >> 1);
-            currentHeight = Math.Max(1u, currentHeight >> 1);
+            currentWidth = currentWidth > 1 ? currentWidth >> 1 : 1u;
+            currentHeight = currentHeight > 1 ? currentHeight >> 1 : 1u;
         }
 
         return total;
