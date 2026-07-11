@@ -15,7 +15,7 @@ namespace GraphicSetter;
 internal static class TextureBlobCache
 {
     private const int Magic = 0x47535443; // GSTC
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private const int ChecksumLength = 32;
     private const long AbsoluteMaxSingleEntryBytes = 256L * 1024L * 1024L;
     private const int TrimEveryWrites = 128;
@@ -43,6 +43,7 @@ internal static class TextureBlobCache
                 TextureFormat format;
                 int mipCount;
                 int dataLength;
+                bool linear;
                 int payloadOffset;
                 byte[] expectedChecksum;
 
@@ -57,6 +58,7 @@ internal static class TextureBlobCache
                     format = (TextureFormat)reader.ReadInt32();
                     mipCount = reader.ReadInt32();
                     dataLength = reader.ReadInt32();
+                    linear = reader.ReadBoolean();
                     expectedChecksum = reader.ReadBytes(ChecksumLength);
                     payloadOffset = checked((int)stream.Position);
 
@@ -71,17 +73,17 @@ internal static class TextureBlobCache
                     if (!SystemInfo.SupportsTextureFormat(format))
                         throw new NotSupportedException($"Cached texture format {format} is unsupported on this device");
 
-                    using SHA256 sha = SHA256.Create();
-                    byte[] actualChecksum = sha.ComputeHash(stream);
+                    byte[] metadata = BuildChecksumMetadata(width, height, format, mipCount, dataLength, linear);
+                    byte[] actualChecksum = ComputeChecksum(metadata, stream);
                     if (!FixedTimeEquals(expectedChecksum, actualChecksum))
-                        throw new InvalidDataException("Cached texture payload checksum mismatch");
+                        throw new InvalidDataException("Cached texture header or payload checksum mismatch");
                 }
 
                 using MemoryMappedFileSpanWrapper memory = new(OpenExistingMmf(cachePath),
                     MemoryMappedFileAccess.Read);
                 Span<byte> payload = memory.GetSpan(payloadOffset).Slice(0, dataLength);
 
-                texture = new Texture2D(width, height, format, mipCount > 1);
+                texture = new Texture2D(width, height, format, mipCount > 1, linear);
                 fixed (byte* dataPointer = &payload[0])
                     texture.LoadRawTextureData((IntPtr)dataPointer, dataLength);
 
@@ -128,9 +130,13 @@ internal static class TextureBlobCache
                 if (rawData == null || rawData.Length == 0 || rawData.LongLength > maximumEntryBytes)
                     return;
 
+                int mipCount = Math.Max(1, texture.mipmapCount);
+                bool linear = IsLinearTexture(source, texture.format);
+                byte[] metadata = BuildChecksumMetadata(texture.width, texture.height, texture.format, mipCount,
+                    rawData.Length, linear);
                 byte[] checksum;
-                using (SHA256 sha = SHA256.Create())
-                    checksum = sha.ComputeHash(rawData);
+                using (MemoryStream rawStream = new(rawData, false))
+                    checksum = ComputeChecksum(metadata, rawStream);
 
                 Directory.CreateDirectory(Path.GetDirectoryName(cachePath));
                 TryDelete(temporaryPath);
@@ -142,8 +148,9 @@ internal static class TextureBlobCache
                     writer.Write(texture.width);
                     writer.Write(texture.height);
                     writer.Write((int)texture.format);
-                    writer.Write(Math.Max(1, texture.mipmapCount));
+                    writer.Write(mipCount);
                     writer.Write(rawData.Length);
+                    writer.Write(linear);
                     writer.Write(checksum);
                     writer.Write(rawData);
                     writer.Flush();
@@ -172,7 +179,8 @@ internal static class TextureBlobCache
         if (source == null || !MissileGirlIntegration.TryGetTextureCacheFolder(out string rootFolder))
             return null;
 
-        string directory = Path.Combine(rootFolder, "GraphicsSetter", $"V{SchemaVersion}");
+        string providerDirectory = Path.Combine(rootFolder, "GraphicsSetter");
+        string directory = Path.Combine(providerDirectory, $"V{SchemaVersion}");
         Directory.CreateDirectory(directory);
 
         lock (Sync)
@@ -180,6 +188,7 @@ internal static class TextureBlobCache
             if (!initialTrimCompleted)
             {
                 initialTrimCompleted = true;
+                CleanupOldSchemaDirectories(providerDirectory, directory);
                 TrimCache(directory);
             }
         }
@@ -196,7 +205,7 @@ internal static class TextureBlobCache
         string ddsMetadata = GetFileMetadata(ddsPath, -1);
 
         string key = string.Join("|",
-            "gstex-v3",
+            "gstex-v4",
             source.FullPath?.Replace('\\', '/').ToLowerInvariant(),
             sourceMetadata,
             ddsMetadata,
@@ -210,6 +219,44 @@ internal static class TextureBlobCache
 
         using SHA256 sha = SHA256.Create();
         return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(key))).Replace("-", string.Empty);
+    }
+
+    private static byte[] BuildChecksumMetadata(int width, int height, TextureFormat format, int mipCount,
+        int dataLength, bool linear)
+    {
+        using MemoryStream stream = new();
+        using (BinaryWriter writer = new(stream, Encoding.UTF8, true))
+        {
+            writer.Write(width);
+            writer.Write(height);
+            writer.Write((int)format);
+            writer.Write(mipCount);
+            writer.Write(dataLength);
+            writer.Write(linear);
+        }
+        return stream.ToArray();
+    }
+
+    private static byte[] ComputeChecksum(byte[] metadata, Stream payload)
+    {
+        using SHA256 sha = SHA256.Create();
+        sha.TransformBlock(metadata, 0, metadata.Length, metadata, 0);
+
+        byte[] buffer = new byte[64 * 1024];
+        int read;
+        while ((read = payload.Read(buffer, 0, buffer.Length)) > 0)
+            sha.TransformBlock(buffer, 0, read, buffer, 0);
+
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        return sha.Hash ?? Array.Empty<byte>();
+    }
+
+    private static bool IsLinearTexture(VirtualFile source, TextureFormat format)
+    {
+        return TexturePolicy.IsDataTexture(source)
+               || format == TextureFormat.BC4
+               || format == TextureFormat.BC5
+               || format == TextureFormat.Alpha8;
     }
 
     private static string GetFileMetadata(string path, long fallbackLength)
@@ -243,6 +290,27 @@ internal static class TextureBlobCache
         long length = info.Length;
         return (MemoryMappedFile.CreateFromFile(info.FullName, FileMode.Open, null, length,
             MemoryMappedFileAccess.Read), length);
+    }
+
+    private static void CleanupOldSchemaDirectories(string providerDirectory, string currentDirectory)
+    {
+        try
+        {
+            if (!Directory.Exists(providerDirectory))
+                return;
+
+            foreach (string directory in Directory.GetDirectories(providerDirectory, "V*"))
+            {
+                if (!string.Equals(Path.GetFullPath(directory), Path.GetFullPath(currentDirectory),
+                        StringComparison.OrdinalIgnoreCase))
+                    Directory.Delete(directory, true);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (GraphicsSettings.mainSettings.verboseLogging)
+                Log.Warning($"[Graphics Settings] Old texture cache cleanup failed: {exception}");
+        }
     }
 
     private static void PublishAtomically(string temporaryPath, string cachePath, string backupPath)
