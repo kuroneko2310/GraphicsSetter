@@ -14,14 +14,27 @@ namespace GraphicSetter;
 
 internal static class TextureBlobCache
 {
+    private sealed class CachedFileIdentity
+    {
+        public long Length;
+        public long LastWriteTicks;
+        public string Signature;
+    }
+
     private const int Magic = 0x47535443; // GSTC
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = TexturePolicy.PipelineVersion;
     private const int ChecksumLength = 32;
+    private const int IdentityChunkSize = 32 * 1024;
     private const long AbsoluteMaxSingleEntryBytes = 256L * 1024L * 1024L;
     private const int TrimEveryWrites = 128;
 
     private static readonly object Sync = new();
-    private static readonly HashSet<string> AccessTimeUpdatedThisSession = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object IdentitySync = new();
+    private static readonly Dictionary<string, CachedFileIdentity> FileIdentityCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> AccessTimeUpdatedThisSession =
+        new(StringComparer.OrdinalIgnoreCase);
+
     private static bool initialTrimCompleted;
     private static int writesSinceTrim;
 
@@ -62,17 +75,7 @@ internal static class TextureBlobCache
                     expectedChecksum = reader.ReadBytes(ChecksumLength);
                     payloadOffset = checked((int)stream.Position);
 
-                    if (expectedChecksum.Length != ChecksumLength)
-                        throw new EndOfStreamException("Cached texture checksum was truncated");
-                    if (width <= 0 || height <= 0 || width > 32768 || height > 32768)
-                        throw new InvalidDataException($"Invalid cached texture dimensions {width}x{height}");
-                    if (mipCount <= 0 || dataLength <= 0 || dataLength > AbsoluteMaxSingleEntryBytes)
-                        throw new InvalidDataException("Invalid cached texture payload metadata");
-                    if (stream.Length - stream.Position != dataLength)
-                        throw new InvalidDataException("Cached texture payload length mismatch");
-                    if (!SystemInfo.SupportsTextureFormat(format))
-                        throw new NotSupportedException($"Cached texture format {format} is unsupported on this device");
-
+                    ValidateHeader(stream, width, height, format, mipCount, dataLength, expectedChecksum);
                     byte[] metadata = BuildChecksumMetadata(width, height, format, mipCount, dataLength, linear);
                     byte[] actualChecksum = ComputeChecksum(metadata, stream);
                     if (!FixedTimeEquals(expectedChecksum, actualChecksum))
@@ -106,7 +109,7 @@ internal static class TextureBlobCache
         }
     }
 
-    public static void TryStore(VirtualFile source, Texture2D texture)
+    public static void TryStore(VirtualFile source, Texture2D texture, bool linear)
     {
         if (!texture || !texture.isReadable)
             return;
@@ -131,7 +134,6 @@ internal static class TextureBlobCache
                     return;
 
                 int mipCount = Math.Max(1, texture.mipmapCount);
-                bool linear = IsLinearTexture(source, texture.format);
                 byte[] metadata = BuildChecksumMetadata(texture.width, texture.height, texture.format, mipCount,
                     rawData.Length, linear);
                 byte[] checksum;
@@ -158,8 +160,7 @@ internal static class TextureBlobCache
                 }
 
                 PublishAtomically(temporaryPath, cachePath, backupPath);
-                writesSinceTrim++;
-                if (writesSinceTrim >= TrimEveryWrites)
+                if (++writesSinceTrim >= TrimEveryWrites)
                 {
                     writesSinceTrim = 0;
                     TrimCache(Path.GetDirectoryName(cachePath));
@@ -172,6 +173,21 @@ internal static class TextureBlobCache
                     Log.Warning($"[Graphics Settings] Failed writing texture cache entry: {exception}");
             }
         }
+    }
+
+    private static void ValidateHeader(Stream stream, int width, int height, TextureFormat format, int mipCount,
+        int dataLength, byte[] checksum)
+    {
+        if (checksum.Length != ChecksumLength)
+            throw new EndOfStreamException("Cached texture checksum was truncated");
+        if (width <= 0 || height <= 0 || width > 32768 || height > 32768)
+            throw new InvalidDataException($"Invalid cached texture dimensions {width}x{height}");
+        if (mipCount <= 0 || dataLength <= 0 || dataLength > AbsoluteMaxSingleEntryBytes)
+            throw new InvalidDataException("Invalid cached texture payload metadata");
+        if (stream.Length - stream.Position != dataLength)
+            throw new InvalidDataException("Cached texture payload length mismatch");
+        if (!SystemInfo.SupportsTextureFormat(format))
+            throw new NotSupportedException($"Cached texture format {format} is unsupported on this device");
     }
 
     private static string GetCachePath(VirtualFile source)
@@ -198,14 +214,14 @@ internal static class TextureBlobCache
 
     private static string BuildSourceKey(VirtualFile source)
     {
-        string sourceMetadata = GetFileMetadata(source.FullPath, source.Length);
+        string sourceMetadata = GetFileIdentity(source.FullPath, source.Length);
         string ddsPath = GraphicsSettings.mainSettings.enableDDSLoading
             ? Path.ChangeExtension(source.FullPath, ".dds")
             : null;
-        string ddsMetadata = GetFileMetadata(ddsPath, -1);
+        string ddsMetadata = GetFileIdentity(ddsPath, -1);
 
         string key = string.Join("|",
-            "gstex-v4",
+            $"gstex-v{SchemaVersion}",
             source.FullPath?.Replace('\\', '/').ToLowerInvariant(),
             sourceMetadata,
             ddsMetadata,
@@ -219,6 +235,77 @@ internal static class TextureBlobCache
 
         using SHA256 sha = SHA256.Create();
         return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(key))).Replace("-", string.Empty);
+    }
+
+    private static string GetFileIdentity(string path, long fallbackLength)
+    {
+        if (path.NullOrEmpty())
+            return "none";
+
+        try
+        {
+            FileInfo info = new(path);
+            if (!info.Exists)
+                return $"missing:{fallbackLength}";
+
+            string fullPath = info.FullName;
+            long length = info.Length;
+            long ticks = info.LastWriteTimeUtc.Ticks;
+            lock (IdentitySync)
+            {
+                if (FileIdentityCache.TryGetValue(fullPath, out CachedFileIdentity cached)
+                    && cached.Length == length
+                    && cached.LastWriteTicks == ticks)
+                    return $"{length}:{ticks}:{cached.Signature}";
+
+                string signature = CalculateBoundarySignature(info);
+                FileIdentityCache[fullPath] = new CachedFileIdentity
+                {
+                    Length = length,
+                    LastWriteTicks = ticks,
+                    Signature = signature
+                };
+                return $"{length}:{ticks}:{signature}";
+            }
+        }
+        catch
+        {
+            return $"unknown:{fallbackLength}";
+        }
+    }
+
+    private static string CalculateBoundarySignature(FileInfo info)
+    {
+        using SHA256 sha = SHA256.Create();
+        using FileStream stream = new(info.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+            IdentityChunkSize, FileOptions.RandomAccess);
+
+        long[] offsets = info.Length <= IdentityChunkSize * 3L
+            ? new[] { 0L }
+            : new[]
+            {
+                0L,
+                Math.Max(0L, info.Length / 2L - IdentityChunkSize / 2L),
+                Math.Max(0L, info.Length - IdentityChunkSize)
+            };
+
+        byte[] buffer = new byte[IdentityChunkSize];
+        foreach (long offset in offsets)
+        {
+            stream.Position = offset;
+            int remaining = (int)Math.Min(IdentityChunkSize, stream.Length - offset);
+            while (remaining > 0)
+            {
+                int read = stream.Read(buffer, 0, Math.Min(buffer.Length, remaining));
+                if (read <= 0)
+                    break;
+                sha.TransformBlock(buffer, 0, read, buffer, 0);
+                remaining -= read;
+            }
+        }
+
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        return BitConverter.ToString(sha.Hash ?? Array.Empty<byte>()).Replace("-", string.Empty);
     }
 
     private static byte[] BuildChecksumMetadata(int width, int height, TextureFormat format, int mipCount,
@@ -249,32 +336,6 @@ internal static class TextureBlobCache
 
         sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
         return sha.Hash ?? Array.Empty<byte>();
-    }
-
-    private static bool IsLinearTexture(VirtualFile source, TextureFormat format)
-    {
-        return TexturePolicy.IsDataTexture(source)
-               || format == TextureFormat.BC4
-               || format == TextureFormat.BC5
-               || format == TextureFormat.Alpha8;
-    }
-
-    private static string GetFileMetadata(string path, long fallbackLength)
-    {
-        if (path.NullOrEmpty())
-            return "none";
-
-        try
-        {
-            FileInfo info = new(path);
-            if (!info.Exists)
-                return $"missing:{fallbackLength}";
-            return $"{info.Length}:{info.LastWriteTimeUtc.Ticks}";
-        }
-        catch
-        {
-            return $"unknown:{fallbackLength}";
-        }
     }
 
     private static long GetMaximumEntryBytes()
