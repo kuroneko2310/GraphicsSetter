@@ -18,6 +18,8 @@ public enum VramBudgetMode
 
 internal static class TexturePolicy
 {
+    public const int PipelineVersion = 5;
+
     private static readonly string[] FullResolutionPathMarkers =
     {
         "/UI/",
@@ -138,7 +140,7 @@ internal static class TexturePolicy
     {
         SettingsGroup settings = GraphicsSettings.mainSettings;
         string raw = string.Join("|",
-            "graphics-setter-policy-v3",
+            $"graphics-setter-pipeline-v{PipelineVersion}",
             settings.enableDDSLoading,
             settings.enableAdaptiveTextureBudget,
             settings.vramBudgetMode,
