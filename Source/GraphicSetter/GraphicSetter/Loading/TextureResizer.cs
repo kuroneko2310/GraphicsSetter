@@ -6,7 +6,7 @@ namespace GraphicSetter;
 
 internal static class TextureResizer
 {
-    public static bool TryResize(ref Texture2D texture, int maxDimension, bool generateMipMaps)
+    public static bool TryResize(ref Texture2D texture, int maxDimension, bool generateMipMaps, bool linear)
     {
         if (!texture || maxDimension <= 0 || (texture.width <= maxDimension && texture.height <= maxDimension))
             return false;
@@ -35,18 +35,16 @@ internal static class TextureResizer
 
         try
         {
-            // LoadRawTextureData does not upload DDS bytes until Apply is called. Blitting before
-            // this point can silently produce an empty or stale resized texture.
             texture.Apply(false, false);
 
             temporary = RenderTexture.GetTemporary(targetWidth, targetHeight, 0, RenderTextureFormat.ARGB32,
-                RenderTextureReadWrite.Default);
+                linear ? RenderTextureReadWrite.Linear : RenderTextureReadWrite.sRGB);
             temporary.filterMode = FilterMode.Bilinear;
             temporary.wrapMode = texture.wrapMode;
             Graphics.Blit(texture, temporary);
             RenderTexture.active = temporary;
 
-            replacement = new Texture2D(targetWidth, targetHeight, TextureFormat.RGBA32, generateMipMaps);
+            replacement = new Texture2D(targetWidth, targetHeight, TextureFormat.RGBA32, generateMipMaps, linear);
             replacement.ReadPixels(new Rect(0, 0, targetWidth, targetHeight), 0, 0, false);
             replacement.Apply(generateMipMaps, false);
             replacement.name = texture.name;
