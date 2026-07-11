@@ -17,8 +17,9 @@ internal static class MissileGirlIntegration
     private static string cachedTextureCacheFolder;
     private static string lastRegisteredFingerprint;
     private static bool bridgeResolved;
+    private static bool? isAvailable;
 
-    public static bool IsAvailable => LoadedModManager.RunningMods.Any(mod =>
+    public static bool IsAvailable => isAvailable ??= LoadedModManager.RunningMods.Any(mod =>
         string.Equals(mod.PackageId, MissileGirlPackageId, StringComparison.OrdinalIgnoreCase));
 
     public static void NotifyPolicyChanged()
@@ -29,7 +30,8 @@ internal static class MissileGirlIntegration
         string fingerprint = TexturePolicy.BuildFingerprint();
         lock (Sync)
         {
-            if (string.Equals(lastRegisteredFingerprint, fingerprint, StringComparison.Ordinal))
+            if (string.Equals(lastRegisteredFingerprint, fingerprint, StringComparison.Ordinal)
+                && !cachedTextureCacheFolder.NullOrEmpty())
                 return;
 
             try
@@ -66,6 +68,15 @@ internal static class MissileGirlIntegration
         if (!GraphicsSettings.mainSettings.enableMissileGirlIntegration || !IsAvailable)
             return false;
 
+        lock (Sync)
+        {
+            if (!cachedTextureCacheFolder.NullOrEmpty())
+            {
+                folder = cachedTextureCacheFolder;
+                return true;
+            }
+        }
+
         NotifyPolicyChanged();
         lock (Sync)
         {
@@ -83,6 +94,7 @@ internal static class MissileGirlIntegration
             bridgeResolved = false;
             registerProviderMethod = null;
             getTextureCacheFolderMethod = null;
+            isAvailable = null;
         }
     }
 
