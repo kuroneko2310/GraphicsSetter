@@ -13,6 +13,6 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Restore
-        run: dotnet restore Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj
+        run: dotnet restore Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --verbosity quiet
       - name: Build
-        run: dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --no-restore
+        run: dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --no-restore --nologo --verbosity quiet /clp:ErrorsOnly
