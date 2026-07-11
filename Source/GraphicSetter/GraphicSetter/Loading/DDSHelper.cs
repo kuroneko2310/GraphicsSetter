@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using GraphicSetter.Patches;
 using RimWorld.IO;
@@ -11,17 +11,18 @@ public class DDSHelper
 {
     public static bool TryLoadDDS(VirtualFile file, ref bool hasMipMapsSet, ref Texture2D texture2D)
     {
-        var ddsExtensionPath = Path.ChangeExtension(file.FullPath, ".dds");
-
+        string ddsExtensionPath = Path.ChangeExtension(file.FullPath, ".dds");
         if (!File.Exists(ddsExtensionPath))
             return false;
-        
-        var loadedFromDds = false;
-        var logWarning = default(string);
-        
+
+        bool loadedFromDds = false;
+        string logWarning = null;
+
         try
         {
-            texture2D = DDSLoader.LoadDDS(ddsExtensionPath, out hasMipMapsSet, true);
+            texture2D = DDSLoader.LoadDDS(ddsExtensionPath, out hasMipMapsSet, true,
+                (width, height) => TexturePolicy.ShouldGenerateMipMaps(file, width, height),
+                TexturePolicy.IsDataTexture(file));
         }
         catch (Exception exception)
         {
@@ -30,20 +31,22 @@ public class DDSHelper
 
         if (!DDSLoader.error.NullOrEmpty())
         {
-            var errorText = $"DDS loading failed for '{ddsExtensionPath}': {DDSLoader.error}";
+            string errorText = $"DDS loading failed for '{ddsExtensionPath}': {DDSLoader.error}";
             if (logWarning.NullOrEmpty())
                 logWarning = errorText;
             else
-                Log.Warning($"DDS loading failed for '{ddsExtensionPath}': {DDSLoader.error}");
-            
+                logWarning += "\n" + errorText;
             DDSLoader.error = null;
         }
 
         if (!texture2D)
         {
-            Log.Warning(logWarning.NullOrEmpty()
-                ? $"Couldn't load .dds from '{ddsExtensionPath}'. Loading from png instead."
-                : $"{logWarning}\nLoading from png instead.");
+            if (GraphicsSettings.mainSettings.verboseLogging || Prefs.LogVerbose)
+            {
+                Log.Warning(logWarning.NullOrEmpty()
+                    ? $"Couldn't load .dds from '{ddsExtensionPath}'. Loading from source image instead."
+                    : $"{logWarning}\nLoading from source image instead.");
+            }
         }
         else
         {
