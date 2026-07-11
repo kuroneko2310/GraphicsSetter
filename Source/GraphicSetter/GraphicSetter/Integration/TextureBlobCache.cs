@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -16,7 +17,7 @@ internal static class TextureBlobCache
     private const int Magic = 0x47535443; // GSTC
     private const int SchemaVersion = 3;
     private const int ChecksumLength = 32;
-    private const long MaxSingleEntryBytes = 1024L * 1024L * 1024L;
+    private const long AbsoluteMaxSingleEntryBytes = 256L * 1024L * 1024L;
     private const int TrimEveryWrites = 128;
 
     private static readonly object Sync = new();
@@ -24,7 +25,7 @@ internal static class TextureBlobCache
     private static bool initialTrimCompleted;
     private static int writesSinceTrim;
 
-    public static bool TryLoad(VirtualFile source, out Texture2D texture, out bool hasMipMaps)
+    public static unsafe bool TryLoad(VirtualFile source, out Texture2D texture, out bool hasMipMaps)
     {
         texture = null;
         hasMipMaps = false;
@@ -37,42 +38,53 @@ internal static class TextureBlobCache
         {
             try
             {
-                using FileStream stream = new(cachePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                using BinaryReader reader = new(stream, Encoding.UTF8, false);
-                if (reader.ReadInt32() != Magic || reader.ReadInt32() != SchemaVersion)
-                    throw new InvalidDataException("Unsupported texture cache schema");
+                int width;
+                int height;
+                TextureFormat format;
+                int mipCount;
+                int dataLength;
+                int payloadOffset;
+                byte[] expectedChecksum;
 
-                int width = reader.ReadInt32();
-                int height = reader.ReadInt32();
-                TextureFormat format = (TextureFormat)reader.ReadInt32();
-                int mipCount = reader.ReadInt32();
-                int dataLength = reader.ReadInt32();
-                byte[] expectedChecksum = reader.ReadBytes(ChecksumLength);
-
-                if (expectedChecksum.Length != ChecksumLength)
-                    throw new EndOfStreamException("Cached texture checksum was truncated");
-                if (width <= 0 || height <= 0 || width > 32768 || height > 32768)
-                    throw new InvalidDataException($"Invalid cached texture dimensions {width}x{height}");
-                if (mipCount <= 0 || dataLength <= 0 || dataLength > MaxSingleEntryBytes)
-                    throw new InvalidDataException("Invalid cached texture payload metadata");
-                if (stream.Length - stream.Position != dataLength)
-                    throw new InvalidDataException("Cached texture payload length mismatch");
-                if (!SystemInfo.SupportsTextureFormat(format))
-                    throw new NotSupportedException($"Cached texture format {format} is unsupported on this device");
-
-                byte[] rawData = reader.ReadBytes(dataLength);
-                if (rawData.Length != dataLength)
-                    throw new EndOfStreamException("Cached texture payload was truncated");
-
-                using (SHA256 sha = SHA256.Create())
+                using (FileStream stream = new(cachePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (BinaryReader reader = new(stream, Encoding.UTF8, false))
                 {
-                    byte[] actualChecksum = sha.ComputeHash(rawData);
+                    if (reader.ReadInt32() != Magic || reader.ReadInt32() != SchemaVersion)
+                        throw new InvalidDataException("Unsupported texture cache schema");
+
+                    width = reader.ReadInt32();
+                    height = reader.ReadInt32();
+                    format = (TextureFormat)reader.ReadInt32();
+                    mipCount = reader.ReadInt32();
+                    dataLength = reader.ReadInt32();
+                    expectedChecksum = reader.ReadBytes(ChecksumLength);
+                    payloadOffset = checked((int)stream.Position);
+
+                    if (expectedChecksum.Length != ChecksumLength)
+                        throw new EndOfStreamException("Cached texture checksum was truncated");
+                    if (width <= 0 || height <= 0 || width > 32768 || height > 32768)
+                        throw new InvalidDataException($"Invalid cached texture dimensions {width}x{height}");
+                    if (mipCount <= 0 || dataLength <= 0 || dataLength > AbsoluteMaxSingleEntryBytes)
+                        throw new InvalidDataException("Invalid cached texture payload metadata");
+                    if (stream.Length - stream.Position != dataLength)
+                        throw new InvalidDataException("Cached texture payload length mismatch");
+                    if (!SystemInfo.SupportsTextureFormat(format))
+                        throw new NotSupportedException($"Cached texture format {format} is unsupported on this device");
+
+                    using SHA256 sha = SHA256.Create();
+                    byte[] actualChecksum = sha.ComputeHash(stream);
                     if (!FixedTimeEquals(expectedChecksum, actualChecksum))
                         throw new InvalidDataException("Cached texture payload checksum mismatch");
                 }
 
+                using MemoryMappedFileSpanWrapper memory = new(OpenExistingMmf(cachePath),
+                    MemoryMappedFileAccess.Read);
+                Span<byte> payload = memory.GetSpan(payloadOffset).Slice(0, dataLength);
+
                 texture = new Texture2D(width, height, format, mipCount > 1);
-                texture.LoadRawTextureData(rawData);
+                fixed (byte* dataPointer = &payload[0])
+                    texture.LoadRawTextureData((IntPtr)dataPointer, dataLength);
+
                 hasMipMaps = mipCount > 1;
                 TouchAccessTimeOccasionally(cachePath);
                 return true;
@@ -97,6 +109,11 @@ internal static class TextureBlobCache
         if (!texture || !texture.isReadable)
             return;
 
+        long maximumEntryBytes = GetMaximumEntryBytes();
+        long estimatedBytes = TextureMemoryEstimator.Estimate(texture);
+        if (estimatedBytes <= 0 || estimatedBytes > maximumEntryBytes)
+            return;
+
         string cachePath = GetCachePath(source);
         if (cachePath == null)
             return;
@@ -108,7 +125,7 @@ internal static class TextureBlobCache
             try
             {
                 byte[] rawData = texture.GetRawTextureData();
-                if (rawData == null || rawData.Length == 0 || rawData.LongLength > MaxSingleEntryBytes)
+                if (rawData == null || rawData.Length == 0 || rawData.LongLength > maximumEntryBytes)
                     return;
 
                 byte[] checksum;
@@ -211,6 +228,21 @@ internal static class TextureBlobCache
         {
             return $"unknown:{fallbackLength}";
         }
+    }
+
+    private static long GetMaximumEntryBytes()
+    {
+        long budgetQuarter = TexturePolicy.EffectiveBudgetMb * 1024L * 1024L / 4L;
+        return Math.Max(32L * 1024L * 1024L,
+            Math.Min(AbsoluteMaxSingleEntryBytes, budgetQuarter));
+    }
+
+    private static (MemoryMappedFile file, long length) OpenExistingMmf(string path)
+    {
+        FileInfo info = new(path);
+        long length = info.Length;
+        return (MemoryMappedFile.CreateFromFile(info.FullName, FileMode.Open, null, length,
+            MemoryMappedFileAccess.Read), length);
     }
 
     private static void PublishAtomically(string temporaryPath, string cachePath, string backupPath)
