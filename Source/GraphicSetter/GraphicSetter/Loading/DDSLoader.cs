@@ -157,7 +157,7 @@ public static class DDSLoader
             {
                 if (!TryReadDx10Header(span, ref index, out textureFormat, out bool dx10Linear))
                     return null;
-                linear |= dx10Linear;
+                linear = forceLinear || dx10Linear;
             }
             else
             {
@@ -284,6 +284,7 @@ public static class DDSLoader
         {
             case DxgiBc1Unorm:
                 textureFormat = TextureFormat.DXT1;
+                linear = true;
                 return true;
             case DxgiBc1UnormSrgb:
                 textureFormat = TextureFormat.DXT1;
@@ -291,6 +292,7 @@ public static class DDSLoader
                 return true;
             case DxgiBc3Unorm:
                 textureFormat = TextureFormat.DXT5;
+                linear = true;
                 return true;
             case DxgiBc3UnormSrgb:
                 textureFormat = TextureFormat.DXT5;
@@ -306,6 +308,7 @@ public static class DDSLoader
                 return true;
             case DxgiBc7Unorm:
                 textureFormat = TextureFormat.BC7;
+                linear = true;
                 return true;
             case DxgiBc7UnormSrgb:
                 textureFormat = TextureFormat.BC7;
