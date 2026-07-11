@@ -24,10 +24,9 @@ public class GraphicSetter : Mod
 
     public override void WriteSettings()
     {
-        Settings.Write();
+        base.WriteSettings();
         MissileGirlIntegration.NotifyPolicyChanged();
         StaticContent.MemoryData.Notify_SettingsChanged();
-        base.WriteSettings();
     }
 
     public override string SettingsCategory()
