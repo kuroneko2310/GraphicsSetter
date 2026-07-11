@@ -15,4 +15,9 @@ jobs:
       - name: Restore
         run: dotnet restore Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --verbosity quiet
       - name: Build
-        run: dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --no-restore --nologo --verbosity quiet /clp:ErrorsOnly
+        shell: pwsh
+        run: |
+          dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --no-restore --nologo --verbosity quiet /clp:ErrorsOnly *> build.log
+          $exitCode = $LASTEXITCODE
+          Get-Content build.log | Select-String -Pattern ': error '
+          exit $exitCode
