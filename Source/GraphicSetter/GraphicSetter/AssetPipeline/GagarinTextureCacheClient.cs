@@ -60,12 +60,26 @@ internal static class GagarinTextureCacheClient
         }
     }
 
+    public static void InvalidateSource(string sourcePath)
+    {
+        if (string.IsNullOrEmpty(sourcePath) || !ResolveBridge()) return;
+        try
+        {
+            Invoke("InvalidateTextureSource", new object[] { sourcePath });
+        }
+        catch (Exception exception)
+        {
+            LogBridgeFailure(exception);
+        }
+    }
+
     public static string ResolvePackageId(string sourcePath)
     {
         if (!ResolveBridge()) return ResolvePackageIdLocally(sourcePath);
         try
         {
-            return Invoke("ResolvePackageIdForPath", new object[] { sourcePath }) as string ?? ResolvePackageIdLocally(sourcePath);
+            var resolved = Invoke("ResolvePackageIdForPath", new object[] { sourcePath }) as string;
+            return string.IsNullOrEmpty(resolved) ? ResolvePackageIdLocally(sourcePath) : resolved;
         }
         catch
         {
@@ -105,13 +119,14 @@ internal static class GagarinTextureCacheClient
 
         lock (Sync)
         {
+            var normalized = NormalizePath(sourcePath);
             var info = new FileInfo(sourcePath);
-            if (SourceHashes.TryGetValue(sourcePath, out var cached) && cached.Size == info.Length && cached.WriteTicks == info.LastWriteTimeUtc.Ticks)
+            if (SourceHashes.TryGetValue(normalized, out var cached) && cached.Size == info.Length && cached.WriteTicks == info.LastWriteTimeUtc.Ticks)
                 return cached.Hash;
             using var sha = SHA256.Create();
             using var stream = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             var hash = ToHex(sha.ComputeHash(stream));
-            SourceHashes[sourcePath] = new SourceHashEntry { Size = info.Length, WriteTicks = info.LastWriteTimeUtc.Ticks, Hash = hash };
+            SourceHashes[normalized] = new SourceHashEntry { Size = info.Length, WriteTicks = info.LastWriteTimeUtc.Ticks, Hash = hash };
             return hash;
         }
     }
@@ -148,9 +163,15 @@ internal static class GagarinTextureCacheClient
     private static void RegisterVersion()
     {
         if (bridgeType == null || versionRegistered) return;
-        versionRegistered = true;
-        try { Invoke("SetGraphicsAlgorithmVersion", new object[] { TexturePipeline.AlgorithmVersion }); }
-        catch (Exception exception) { LogBridgeFailure(exception); }
+        try
+        {
+            Invoke("SetGraphicsAlgorithmVersion", new object[] { TexturePipeline.AlgorithmVersion });
+            versionRegistered = true;
+        }
+        catch (Exception exception)
+        {
+            LogBridgeFailure(exception);
+        }
     }
 
     private static object Invoke(string methodName, object[] arguments)
