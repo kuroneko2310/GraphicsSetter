@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - integration/asset-pipeline-safety
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Capture repository tree
+        shell: pwsh
+        run: git rev-parse 'HEAD^{tree}' | Out-File -Encoding ascii tree-sha.txt
+      - name: Restore
+        run: dotnet restore Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj
+      - name: Build
+        shell: pwsh
+        run: |
+          dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --no-restore 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload source snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GraphicsSetter-source
+          path: |
+            Source
+            About
+            Languages
+            docs
+            tree-sha.txt
+            build.log
+          if-no-files-found: warn
