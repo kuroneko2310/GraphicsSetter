@@ -11,6 +11,13 @@ internal static class MissileGirlIntegration
     private const string BridgeTypeName = "Gagarin.GraphicsIntegrationBridge, Gagarin";
     private const string ProviderId = "Telefonmast.GraphicsSettings";
 
+    private static readonly object Sync = new();
+    private static MethodInfo registerProviderMethod;
+    private static MethodInfo getTextureCacheFolderMethod;
+    private static string cachedTextureCacheFolder;
+    private static string lastRegisteredFingerprint;
+    private static bool bridgeResolved;
+
     public static bool IsAvailable => LoadedModManager.RunningMods.Any(mod =>
         string.Equals(mod.PackageId, MissileGirlPackageId, StringComparison.OrdinalIgnoreCase));
 
@@ -19,22 +26,37 @@ internal static class MissileGirlIntegration
         if (!GraphicsSettings.mainSettings.enableMissileGirlIntegration || !IsAvailable)
             return;
 
-        try
+        string fingerprint = TexturePolicy.BuildFingerprint();
+        lock (Sync)
         {
-            Type bridgeType = Type.GetType(BridgeTypeName, false);
-            MethodInfo method = bridgeType?.GetMethod("RegisterGraphicsProvider",
-                BindingFlags.Public | BindingFlags.Static);
-            method?.Invoke(null, new object[]
+            if (string.Equals(lastRegisteredFingerprint, fingerprint, StringComparison.Ordinal))
+                return;
+
+            try
             {
-                ProviderId,
-                typeof(GraphicSetter).Assembly.GetName().Version?.ToString() ?? "unknown",
-                TexturePolicy.BuildFingerprint()
-            });
-        }
-        catch (Exception exception)
-        {
-            if (GraphicsSettings.mainSettings.verboseLogging)
-                Log.Warning($"[Graphics Settings] MissileGirl integration failed: {exception}");
+                if (!TryResolveBridge())
+                    return;
+
+                registerProviderMethod.Invoke(null, new object[]
+                {
+                    ProviderId,
+                    typeof(GraphicSetter).Assembly.GetName().Version?.ToString() ?? "unknown",
+                    fingerprint
+                });
+
+                lastRegisteredFingerprint = fingerprint;
+                cachedTextureCacheFolder = getTextureCacheFolderMethod.Invoke(null, null) as string;
+            }
+            catch (Exception exception)
+            {
+                bridgeResolved = false;
+                registerProviderMethod = null;
+                getTextureCacheFolderMethod = null;
+                cachedTextureCacheFolder = null;
+
+                if (GraphicsSettings.mainSettings.verboseLogging)
+                    Log.Warning($"[Graphics Settings] MissileGirl integration failed: {exception}");
+            }
         }
     }
 
@@ -44,20 +66,37 @@ internal static class MissileGirlIntegration
         if (!GraphicsSettings.mainSettings.enableMissileGirlIntegration || !IsAvailable)
             return false;
 
-        try
+        NotifyPolicyChanged();
+        lock (Sync)
         {
-            NotifyPolicyChanged();
-            Type bridgeType = Type.GetType(BridgeTypeName, false);
-            MethodInfo method = bridgeType?.GetMethod("GetTextureCacheFolder",
-                BindingFlags.Public | BindingFlags.Static);
-            folder = method?.Invoke(null, null) as string;
+            folder = cachedTextureCacheFolder;
             return !folder.NullOrEmpty();
         }
-        catch (Exception exception)
+    }
+
+    public static void ResetCachedBridge()
+    {
+        lock (Sync)
         {
-            if (GraphicsSettings.mainSettings.verboseLogging)
-                Log.Warning($"[Graphics Settings] Could not access MissileGirl texture cache: {exception}");
-            return false;
+            lastRegisteredFingerprint = null;
+            cachedTextureCacheFolder = null;
+            bridgeResolved = false;
+            registerProviderMethod = null;
+            getTextureCacheFolderMethod = null;
         }
+    }
+
+    private static bool TryResolveBridge()
+    {
+        if (bridgeResolved)
+            return registerProviderMethod != null && getTextureCacheFolderMethod != null;
+
+        Type bridgeType = Type.GetType(BridgeTypeName, false);
+        registerProviderMethod = bridgeType?.GetMethod("RegisterGraphicsProvider",
+            BindingFlags.Public | BindingFlags.Static);
+        getTextureCacheFolderMethod = bridgeType?.GetMethod("GetTextureCacheFolder",
+            BindingFlags.Public | BindingFlags.Static);
+        bridgeResolved = registerProviderMethod != null && getTextureCacheFolderMethod != null;
+        return bridgeResolved;
     }
 }
