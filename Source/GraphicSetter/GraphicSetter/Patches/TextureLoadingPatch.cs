@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.IO;
 using HarmonyLib;
 using JetBrains.Annotations;
 using RimWorld.IO;
 using UnityEngine;
 using Verse;
+using Object = UnityEngine.Object;
 
 namespace GraphicSetter.Patches;
 
@@ -16,83 +17,117 @@ internal static class TextureLoadingPatch
         [UsedImplicitly]
         public static bool Prefix(VirtualFile file, ref Texture2D __result)
         {
-            __result = CustomLoad(file);
-            return false;
+            if (TryCustomLoad(file, out Texture2D texture))
+            {
+                __result = texture;
+                return false;
+            }
+
+            return true;
         }
 
         public static Texture2D CustomLoad(VirtualFile file, bool readable = false)
         {
-            Texture2D texture2D = null;
-            var settings = GraphicsSettings.mainSettings;
+            return TryCustomLoad(file, out Texture2D texture, readable) ? texture : null;
+        }
+
+        public static bool TryCustomLoad(VirtualFile file, out Texture2D texture2D, bool readable = false)
+        {
+            texture2D = null;
+            SettingsGroup settings = GraphicsSettings.mainSettings;
+            if (file == null)
+                return false;
+
             try
             {
-                var hasMipMapsSet = false;
-                var loadedFromDds = DDSHelper.TryLoadDDS(file, ref hasMipMapsSet, ref texture2D);
+                bool linearTexture = TexturePolicy.IsDataTexture(file);
+                bool rawMipDataFinalized;
+                bool loadedFromCache = TextureBlobCache.TryLoad(file, out texture2D, out rawMipDataFinalized);
+                if (loadedFromCache)
+                    rawMipDataFinalized = true;
+
+                bool loadedFromDds = false;
+                if (!loadedFromCache)
+                {
+                    rawMipDataFinalized = false;
+                    loadedFromDds = settings.enableDDSLoading
+                                    && DDSHelper.TryLoadDDS(file, ref rawMipDataFinalized, ref linearTexture,
+                                        ref texture2D);
+                }
 
                 if (!texture2D && file.Exists)
                 {
-                    var data = file.ReadAllBytes();
-                    texture2D = new(2, 2, TextureFormat.Alpha8, true /*settings.useMipMap*/);
-                    texture2D.LoadImage(data);
-                    hasMipMapsSet = FixMipMapsIfNeeded(ref texture2D, data, file);
+                    byte[] data = file.ReadAllBytes();
+                    bool generateMipMaps = true;
+                    if (ImageHeaderUtility.TryReadPngDimensions(data, out int width, out int height))
+                        generateMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, width, height);
+
+                    texture2D = new Texture2D(2, 2, TextureFormat.Alpha8, generateMipMaps, linearTexture);
+                    if (!texture2D.LoadImage(data))
+                    {
+                        Object.DestroyImmediate(texture2D);
+                        texture2D = null;
+                        return false;
+                    }
+
+                    rawMipDataFinalized = !generateMipMaps;
                 }
 
                 if (!texture2D)
-                    throw new($"Could not load texture at '{file.FullPath}'.");
-
-                if (!loadedFromDds && Prefs.TextureCompression)
-                    texture2D.Compress(true);
+                    return false;
 
                 texture2D.name = Path.GetFileNameWithoutExtension(file.Name);
-                texture2D.filterMode = FilterMode.Trilinear;
-                
                 texture2D.anisoLevel = 1;
-                // 2 or higher is impossible to display with rimworld's orthographic camera.
-                // Planets are loaded from asset bundles
-                
-                texture2D.mipMapBias = settings.mipMapBias;
-                texture2D.Apply(!hasMipMapsSet, !readable);
+
+                if (!loadedFromCache)
+                {
+                    int maxDimension = TexturePolicy.ResolveMaxTextureDimension(file);
+                    bool generateResizedMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, texture2D.width,
+                        texture2D.height);
+                    if (TextureResizer.TryResize(ref texture2D, maxDimension, generateResizedMipMaps, linearTexture))
+                        rawMipDataFinalized = true;
+
+                    if (!loadedFromDds && Prefs.TextureCompression && CanCompressSafely(file, texture2D))
+                        texture2D.Compress(true);
+                }
+
+                texture2D.Apply(!rawMipDataFinalized, false);
+                if (!loadedFromCache)
+                    TextureBlobCache.TryStore(file, texture2D, linearTexture);
+
+                TextureRuntimeRegistry.RegisterAndApply(texture2D);
+                if (!readable)
+                    texture2D.Apply(false, true);
+
+                return true;
             }
             catch (Exception exception)
             {
-                Log.Error($"[Graphics Settings][{(file?.Name ?? "Missing File...")}] {exception}");
-            }
+                if (texture2D)
+                    Object.DestroyImmediate(texture2D);
+                texture2D = null;
 
-            return texture2D;
+                if (settings.verboseLogging || Prefs.LogVerbose)
+                    Log.Warning($"[Graphics Settings][{file.Name}] Custom texture load failed; falling back to vanilla. {exception}");
+                return false;
+            }
         }
     }
 
-    private static bool FixMipMapsIfNeeded(ref Texture2D texture2D, byte[] data, VirtualFile file)
+    private static bool CanCompressSafely(VirtualFile file, Texture2D texture)
     {
-        if (!CheckMipMapFix(texture2D, file))
+        if (!texture || TexturePolicy.IsDataTexture(file))
             return false;
 
-        UnityEngine.Object.DestroyImmediate(texture2D);
+        bool blockAligned = texture.width >= 4 && texture.height >= 4
+                            && (texture.width & 3) == 0
+                            && (texture.height & 3) == 0;
+        if (!blockAligned && (GraphicsSettings.mainSettings.verboseLogging || Prefs.LogVerbose))
+        {
+            Log.Message($"[Graphics Settings] Keeping '{file.Name}' uncompressed because its "
+                        + $"{texture.width}x{texture.height} dimensions are not BC block-aligned.");
+        }
 
-        texture2D = new(2, 2, TextureFormat.Alpha8, false);
-        texture2D.LoadImage(data);
-        return true;
+        return blockAligned;
     }
-
-    public static bool CheckMipMapFix(Texture2D texture2D, VirtualFile file)
-    {
-        var needsFix = NeedsMipMapFix(texture2D);
-        if (needsFix)
-            LogMipMapWarning(texture2D, file);
-
-        return needsFix;
-    }
-
-    private static void LogMipMapWarning(Texture2D texture2D, VirtualFile file)
-    {
-        if (!Prefs.LogVerbose)
-            return;
-
-        Log.Warning($"Texture does not support mipmapping, needs to be divisible by 4 ({
-            texture2D.width}x{texture2D.height}) for '{file.Name}'");
-    }
-
-    private static bool NeedsMipMapFix(Texture2D texture2D)
-        => /*GraphicsSettings.mainSettings.useMipMap
-            &&*/ (((texture2D.width & 3) != 0) | ((texture2D.height & 3) != 0));
 }

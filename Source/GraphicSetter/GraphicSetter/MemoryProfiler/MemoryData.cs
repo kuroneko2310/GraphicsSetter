@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -9,188 +9,211 @@ namespace GraphicSetter;
 
 public class MemoryData
 {
-    //private static Dictionary<ModContentPack, long> RawMemoryUsageByMod = new Dictionary<ModContentPack, long>();
     private static readonly Dictionary<ModContentPack, CachedModData> ModData = new();
     private static readonly Dictionary<Pair<string, bool>, long> MemoryUsageByAtlas = new();
 
     private static readonly Color ListingBG = new ColorInt(32, 36, 40).ToColor;
     private static readonly Color NiceBlue = new ColorInt(38, 169, 224).ToColor;
+    private const float CriticalPct = 0.8f;
 
-    private static IEnumerable<ModContentPack> CurrentMods => LoadedModManager.RunningMods.Where(t => t.GetContentHolder<Texture2D>().contentList.Any());
+    private bool paused;
+    private int scanGeneration;
+    private int processedMods;
+    private List<ModContentPack> currentMods = new();
 
-    private bool shouldStop;
-
-    private long TotalBytes => ModData.Sum(t => t.Value.MemoryUsage);
-    private long TotalBytesAtlas => MemoryUsageByAtlas.Sum(t => t.Value);
-
+    private long TotalBytes => ModData.Sum(pair => pair.Value.MemoryUsage);
+    private long TotalBytesAtlas => MemoryUsageByAtlas.Sum(pair => pair.Value);
     private long TotalUsage => TotalBytes + TotalBytesAtlas;
+    private long MainMemory => Math.Max(256_000_000L, TexturePolicy.EffectiveBudgetMb * 1_000_000L);
+    private float RawUsageFraction => MainMemory <= 0 ? 0f : (float)(TotalUsage / (double)MainMemory);
+    private float DisplayUsageFraction => Mathf.Clamp01(RawUsageFraction);
 
     private long LargestModSize { get; set; }
     private long LargestAtlasSize { get; set; }
-
-    private long TotalRAM => SystemInfo.systemMemorySize * 1000000L;
-    private long TotalVRAM => SystemInfo.graphicsMemorySize * 1000000L;
-
-    private long MainMemory => TotalVRAM;
-    private float TotalPctUsage => (float)(TotalUsage / (double)MainMemory);
-
     private bool Calculating { get; set; }
+    private bool Critical => RawUsageFraction > CriticalPct;
 
-    private static readonly float CriticalPct = 0.8f; //0.75f;
-
-    private bool Critical => TotalPctUsage > CriticalPct;
-
-    public bool MEMOVERFLOW => TotalPctUsage > 1f;
-
-    // public static Texture2D ToTexture2D(RenderTexture rTex)
-    // {
-    //     RenderTexture.active = rTex;
-    //     var settings = GraphicsSettings.mainSettings;
-    //     var size = 2048 * settings.pawnTexResScale;
-    //     var dest = new Texture2D(size, size, TextureFormat.RGBA32, false);
-    //     dest.ReadPixels(new Rect(0, 0, size, size), 0, 0);
-    //     dest.Apply(false, false);
-    //     RenderTexture.active = null;
-    //     return dest;
-    // }
+    public bool MEMOVERFLOW => RawUsageFraction > 1f;
+    public Coroutine routine, routine2;
 
     public void Notify_SettingsChanged()
     {
+        scanGeneration++;
         Calculating = false;
-        shouldStop = false;
+        paused = false;
+        processedMods = 0;
+        currentMods.Clear();
         ModData.Clear();
-    }
-
-    public Coroutine routine, routine2;
-    
-    private void CalculateTextureImpact()
-    {
-        routine = StaticContent.CoroutineDriver.StartCoroutine(CalculateTextureMemory());
-    }
-    
-    private void CalculateAtlasImpact()
-    {
-        routine2 = StaticContent.CoroutineDriver.StartCoroutine(CalculateAtlasMemory());
+        MemoryUsageByAtlas.Clear();
+        LargestModSize = 0;
+        LargestAtlasSize = 0;
+        SelMod = null;
     }
 
     private void Notify_ChangeState()
     {
-        if (!CurrentMods.Any()) return;
-
         if (Calculating)
         {
-            shouldStop = !shouldStop;
+            paused = !paused;
             return;
         }
 
-        CalculateTextureImpact();
+        currentMods = SnapshotCurrentMods();
+        if (currentMods.Count == 0)
+            return;
+
+        scanGeneration++;
+        int generation = scanGeneration;
+        processedMods = 0;
+        paused = false;
         Calculating = true;
-    }
-
-    private IEnumerator CalculateAtlasMemory()
-    {
-        MemoryUsageByAtlas.Clear();
-
-        var allAtlases = GlobalTextureAtlasManager.staticTextureAtlases;
-        foreach (var atlas in allAtlases)
-        {
-            var texture = TextureAtlasHelper.MakeReadableTextureInstance(atlas.ColorTexture);
-            long size = texture.GetRawTextureData().Length;
-            new DisposableTexture(texture).Dispose();
-
-            var pair = new Pair<string, bool>(atlas.groupKey.group.ToString(), atlas.groupKey.hasMask);
-            MemoryUsageByAtlas.Add(pair, size);
-            LargestAtlasSize = MemoryUsageByAtlas[pair] > LargestAtlasSize
-                ? MemoryUsageByAtlas[pair]
-                : LargestAtlasSize;
-            yield return null;
-        }
-    }
-
-    private IEnumerator CalculateTextureMemory()
-    {
         ModData.Clear();
-        var count = CurrentMods.Count();
-        var k = 0;
-        while (shouldStop || k < count)
+        MemoryUsageByAtlas.Clear();
+        LargestModSize = 0;
+        LargestAtlasSize = 0;
+        routine = StaticContent.CoroutineDriver.StartCoroutine(CalculateMemory(generation));
+    }
+
+    private IEnumerator CalculateMemory(int generation)
+    {
+        for (int modIndex = 0; modIndex < currentMods.Count; modIndex++)
         {
-            if (shouldStop)
+            if (generation != scanGeneration)
+                yield break;
+
+            while (paused)
             {
+                if (generation != scanGeneration)
+                    yield break;
                 yield return null;
+            }
+
+            ModContentPack mod = currentMods[modIndex];
+            CachedModData data = new(mod);
+            ModData[mod] = data;
+
+            List<Texture2D> textures;
+            try
+            {
+                textures = mod.textures.contentList.Values.Where(texture => texture).ToList();
+            }
+            catch (Exception exception)
+            {
+                Log.Warning($"[Graphics Settings] Could not enumerate textures for {mod.Name}: {exception.Message}");
+                processedMods++;
                 continue;
             }
 
-            var mod = CurrentMods.ElementAt(k);
-            ModData.Add(mod, new CachedModData(mod));
-            IReadOnlyCollection<Texture2D> allTextures = mod.textures.contentList.Values;
-            var i = 0;
-            while (shouldStop || i < allTextures.Count)
+            for (int textureIndex = 0; textureIndex < textures.Count; textureIndex++)
             {
-                if (shouldStop)
+                if (generation != scanGeneration)
+                    yield break;
+
+                while (paused)
                 {
+                    if (generation != scanGeneration)
+                        yield break;
                     yield return null;
-                    continue;
                 }
 
-                var texture = allTextures.ElementAt(i);
-                ModData[mod].RegisterTexture(texture);
-                i++;
-                if (i % 3 == 0) yield return null;
+                data.RegisterTexture(textures[textureIndex]);
+                if ((textureIndex & 7) == 7)
+                    yield return null;
             }
 
-            LargestModSize = ModData[mod].MemoryUsage > LargestModSize ? ModData[mod].MemoryUsage : LargestModSize;
-            k++;
+            LargestModSize = Math.Max(LargestModSize, data.MemoryUsage);
+            processedMods++;
+            yield return null;
         }
 
-        Calculating = false;
-        //GraphicSetter.Settings.CausedMemOverflow = MEMOVERFLOW;
+        // Estimate atlas memory from texture metadata. Never create a readable copy merely
+        // to measure it; doing so can double peak RAM/VRAM for very large atlases.
+        foreach (StaticTextureAtlas atlas in GlobalTextureAtlasManager.staticTextureAtlases.ToList())
+        {
+            if (generation != scanGeneration)
+                yield break;
+
+            while (paused)
+            {
+                if (generation != scanGeneration)
+                    yield break;
+                yield return null;
+            }
+
+            long size = TextureMemoryEstimator.Estimate(atlas.ColorTexture)
+                        + TextureMemoryEstimator.Estimate(atlas.MaskTexture);
+            Pair<string, bool> key = new(atlas.groupKey.group.ToString(), atlas.groupKey.hasMask);
+            if (MemoryUsageByAtlas.TryGetValue(key, out long existing))
+                MemoryUsageByAtlas[key] = existing + size;
+            else
+                MemoryUsageByAtlas[key] = size;
+
+            LargestAtlasSize = Math.Max(LargestAtlasSize, MemoryUsageByAtlas[key]);
+            yield return null;
+        }
+
+        if (generation == scanGeneration)
+        {
+            paused = false;
+            Calculating = false;
+        }
     }
 
-    private float MemoryPctOf(Pair<string, bool> pair, out long memUsage)
+    private static List<ModContentPack> SnapshotCurrentMods()
     {
-        memUsage = 0;
-        if (!MemoryUsageByAtlas.TryGetValue(pair, out var atla)) return 0;
-        memUsage = atla;
-        return (float)(memUsage / (double)TotalBytesAtlas);
+        List<ModContentPack> result = new();
+        foreach (ModContentPack mod in LoadedModManager.RunningMods)
+        {
+            try
+            {
+                if (mod.GetContentHolder<Texture2D>()?.contentList?.Any() == true)
+                    result.Add(mod);
+            }
+            catch (Exception exception)
+            {
+                if (GraphicsSettings.mainSettings.verboseLogging)
+                    Log.Warning($"[Graphics Settings] Skipping memory scan for {mod?.Name}: {exception.Message}");
+            }
+        }
+        return result;
     }
 
-    private Color GetColorFor(Pair<string, bool> pair)
+    private float MemoryPctOf(ModContentPack mod, out long memoryUsage)
     {
-        if (!MemoryUsageByAtlas.TryGetValue(pair, out var memUsage)) return Color.green;
-        var floatPct = (float)(memUsage / (double)LargestAtlasSize);
-        return Color.Lerp(NiceBlue, Color.magenta, floatPct);
-    }
+        memoryUsage = 0;
+        if (!ModData.TryGetValue(mod, out CachedModData data))
+            return 0f;
 
-    private float MemoryPctOf(ModContentPack mod, out long memUsage)
-    {
-        memUsage = 0;
-        if (!ModData.ContainsKey(mod)) return 0;
-        memUsage = ModData[mod].MemoryUsage;
-        return (float)(memUsage / (double)TotalBytes);
+        memoryUsage = data.MemoryUsage;
+        long total = TotalBytes;
+        return total <= 0 ? 0f : Mathf.Clamp01((float)(memoryUsage / (double)total));
     }
 
     private Color GetColorFor(ModContentPack mod)
     {
-        if (!ModData.TryGetValue(mod, out var value)) return Color.green;
-        var memUsage = value.MemoryUsage;
-        var floatPct = (float)(memUsage / (double)LargestModSize);
-        return Color.Lerp(NiceBlue, Color.magenta, floatPct);
+        if (!ModData.TryGetValue(mod, out CachedModData data) || LargestModSize <= 0)
+            return Color.green;
+        return Color.Lerp(NiceBlue, Color.magenta,
+            Mathf.Clamp01((float)(data.MemoryUsage / (double)LargestModSize)));
     }
 
-    private static string MemoryString(long memUsage, long maxMem, bool cap = false)
+    private static string MemoryString(long memoryUsage, long maximumMemory, bool cap = false)
     {
-        //return memUsage + " bytes";
-        if (cap && memUsage > maxMem) return ">" + MemoryString(maxMem, maxMem);
-        if (memUsage < 1000) return memUsage + " bytes";
-
-        if (memUsage < 1000000) return Math.Round(memUsage / 1000d, 2) + "kB";
-
-        if (memUsage < 1000000000) return Math.Round(memUsage / 1000000d, 2) + "MB";
-        return Math.Round(memUsage / 1000000000d, 2) + "GB";
+        if (memoryUsage < 0)
+            memoryUsage = 0;
+        if (cap && memoryUsage > maximumMemory)
+            return ">" + MemoryString(maximumMemory, maximumMemory);
+        if (memoryUsage < 1_000)
+            return memoryUsage + " bytes";
+        if (memoryUsage < 1_000_000)
+            return Math.Round(memoryUsage / 1_000d, 2) + "kB";
+        if (memoryUsage < 1_000_000_000)
+            return Math.Round(memoryUsage / 1_000_000d, 2) + "MB";
+        return Math.Round(memoryUsage / 1_000_000_000d, 2) + "GB";
     }
 
-    //Render Data
-    private Vector2 scrollview = new(0, 0);
+    private Vector2 scrollview = Vector2.zero;
+    private static ModContentPack SelMod;
 
     public void DrawPawnAtlasMemory(Rect rect)
     {
@@ -198,160 +221,136 @@ public class MemoryData
 
     public void DrawMemoryData(Rect rect)
     {
-        var topHalf = rect.TopPart(0.75f);
-        var bottomHalf = rect.BottomPart(0.25f);
-        DrawModList(topHalf);
-        WriteProcessingData(bottomHalf);
+        Rect top = rect.TopPart(0.75f);
+        Rect bottom = rect.BottomPart(0.25f);
+        DrawModList(top);
+        WriteProcessingData(bottom);
     }
-
-    private static ModContentPack SelMod;
 
     public void DrawModList(Rect rect)
     {
         rect = new Rect(rect.x, rect.y + 20, rect.width, rect.height - 20);
-        var newRect = rect.ContractedBy(5);
-        var leftSide = newRect;
-        //var leftSide = newRect.LeftHalf().ContractedBy(1);
-        //var rightSide = newRect.RightHalf().ContractedBy(1);
+        Rect leftSide = rect.ContractedBy(5);
 
         Widgets.DrawBoxSolid(rect, ListingBG);
         GUI.color = Color.gray;
         Widgets.DrawBox(rect);
         GUI.color = Color.white;
+        Widgets.Label(new Rect(leftSide.x, rect.y - 20, leftSide.width, 20),
+            "GS_AllTextureMemory".Translate());
 
-        Widgets.DrawBoxSolid(new Rect(leftSide.xMax, rect.y, 2, rect.height), Color.gray);
-
-        Widgets.Label(new Rect(leftSide.x, rect.y - 20, leftSide.width, 20), "GS_AllTextureMemory".Translate());
         GUI.BeginGroup(leftSide);
+        try
         {
-            var y = 0;
-            var extraY = SelMod != null ? 80 : 0;
-            var viewRect = new Rect(0, 0, leftSide.width, CurrentMods.Count() * 20 + extraY);
+            float y = 0;
+            float extraY = SelMod != null ? 80 : 0;
+            Rect viewRect = new(0, 0, leftSide.width, Math.Max(leftSide.height,
+                ModData.Count * 20 + extraY));
             Widgets.BeginScrollView(new Rect(0, 0, leftSide.width, leftSide.height), ref scrollview, viewRect, false);
-            var list = ModData.ToList();
-            list.Sort((p1, p2) => p2.Value.MemoryUsage.CompareTo(p1.Value.MemoryUsage));
-            foreach (var mod in list)
-            {
-                var pct = MemoryPctOf(mod.Key, out var memUsage);
-                var text = mod.Key.Name + " (" + MemoryString(memUsage, MainMemory) + ") " + pct.ToStringPercent();
-                var tipRect = new Rect(0, y, rect.width, 20);
-                RenderUtils.FillableBarLabeled(new Rect(0, y, leftSide.width, 18), pct, text, GetColorFor(mod.Key),
-                    Color.clear, false);
-                //WidgetRow row = new WidgetRow(0, y, UIDirection.RightThenDown);
-                //row.FillableBar(newRect.width, 18, pct, text, GetColorFor(pct), StaticContent.clear);
-                Widgets.DrawHighlightIfMouseover(tipRect);
-                TooltipHandler.TipRegion(tipRect, text);
-                if (Widgets.ButtonInvisible(tipRect)) SelMod = SelMod != null ? null : mod.Key;
 
-                if (SelMod == mod.Key)
+            List<KeyValuePair<ModContentPack, CachedModData>> entries = ModData.ToList();
+            entries.Sort((left, right) => right.Value.MemoryUsage.CompareTo(left.Value.MemoryUsage));
+            foreach (KeyValuePair<ModContentPack, CachedModData> entry in entries)
+            {
+                float fraction = MemoryPctOf(entry.Key, out long memoryUsage);
+                string label = entry.Key.Name + " (" + MemoryString(memoryUsage, MainMemory) + ") "
+                               + fraction.ToStringPercent();
+                Rect row = new(0, y, leftSide.width, 20);
+                RenderUtils.FillableBarLabeled(new Rect(0, y, leftSide.width, 18), fraction, label,
+                    GetColorFor(entry.Key), Color.clear, false);
+                Widgets.DrawHighlightIfMouseover(row);
+                TooltipHandler.TipRegion(row, label);
+                if (Widgets.ButtonInvisible(row))
+                    SelMod = SelMod == entry.Key ? null : entry.Key;
+
+                if (SelMod == entry.Key)
                 {
-                    DrawSelModReadout(mod.Key, new Rect(0, tipRect.yMax, tipRect.width, 80));
+                    DrawSelModReadout(entry.Key, new Rect(0, row.yMax, row.width, 80));
                     y += 80;
                 }
-
                 y += 20;
             }
 
-            if (!ModData.Any())
+            if (entries.Count == 0)
             {
-                string text = CurrentMods.Any()
-                    ? "GS_ModsToProcessLabel".Translate(CurrentMods.Count())
+                int availableCount = currentMods.Count > 0 ? currentMods.Count : SnapshotCurrentMods().Count;
+                string label = availableCount > 0
+                    ? "GS_ModsToProcessLabel".Translate(availableCount)
                     : "GS_NoModsToProcess".Translate();
-                var textHeight = Text.CalcHeight(text, rect.width);
-                Widgets.Label(new Rect(0, y, rect.width, textHeight), text);
+                Widgets.Label(new Rect(0, y, leftSide.width, Text.CalcHeight(label, leftSide.width)), label);
             }
 
             Widgets.EndScrollView();
         }
-        GUI.EndGroup();
-
-        /*//ATLAS
-        Widgets.Label(new Rect(rightSide.x, rect.y - 20, rightSide.width, 20), "GS_CachedAtlasses".Translate());
-        GUI.BeginGroup(rightSide);
+        finally
         {
-            var y = 0;
-            var viewRect = new Rect(0, 0, rightSide.width, MemoryUsageByAtlas.Count() * 20);
-            Widgets.BeginScrollView(new Rect(0, 0, rightSide.width, rightSide.height), ref scrollview, viewRect, false);
-            var list = MemoryUsageByAtlas.ToList();
-            list.Sort((p1, p2) => p2.Value.CompareTo(p1.Value));
-            foreach (var atlas in list)
-            {
-                var pct = MemoryPctOf(atlas.Key, out var memUsage);
-                var text =
-                    $"{atlas.Key.First}{(atlas.Key.Second ? "[Masks]" : "")}: ({MemoryString(memUsage, MainMemory)}) {pct.ToStringPercent()}";
-                var tipRect = new Rect(0, y, rect.width, 20);
-                RenderUtils.FillableBarLabeled(new Rect(0, y, rightSide.width, 18), pct, text, GetColorFor(atlas.Key),
-                    Color.clear, false);
-                Widgets.DrawHighlightIfMouseover(tipRect);
-                TooltipHandler.TipRegion(tipRect, text);
-                y += 20;
-            }
-
-            Widgets.EndScrollView();
+            GUI.EndGroup();
         }
-        GUI.EndGroup();*/
     }
 
-    private void DrawSelModReadout(ModContentPack selMod, Rect rect)
+    private static void DrawSelModReadout(ModContentPack selectedMod, Rect rect)
     {
-        var listing = new Listing_Standard();
+        if (!ModData.TryGetValue(selectedMod, out CachedModData data))
+            return;
+
+        Listing_Standard listing = new();
         listing.Begin(rect);
-        listing.Label($"TotalTextures: {ModData[selMod].TotalTextureCount.ToString()}");
-        listing.Label($"TotalTextures In Atlas: {ModData[selMod].TexturesInAtlasCount.ToString()}");
-        listing.Label($"TotalTextures Outside Atlas: {ModData[selMod].TexturesWithoutAtlasCount.ToString()}");
+        listing.Label($"Total textures: {data.TotalTextureCount}");
+        listing.Label($"Atlas-sized textures: {data.TexturesInAtlasCount}");
+        listing.Label($"Large textures: {data.TexturesWithoutAtlasCount}");
+        listing.Label($"Textures with mipmaps: {data.TexturesWithMipMaps}");
         listing.End();
     }
 
     public void WriteProcessingData(Rect rect)
     {
         GUI.BeginGroup(rect);
-
-        var buttons = new Rect(0, 5, rect.width * 0.20f, 22);
-        var barRect = new Rect(buttons.xMax + 5, 5, rect.width - buttons.width - 5, 22);
-        var curY = buttons.height;
-        string text = Calculating
-            ? shouldStop ? "GS_CacheContinue".Translate() : "GS_CacheStop".Translate()
-            : "GS_CacheRecalc".Translate();
-        if (Widgets.ButtonText(buttons, text, true, false, CurrentMods.Any())) Notify_ChangeState();
-
-        Widgets.FillableBar(barRect, TotalPctUsage, StaticContent.blue, Texture2D.blackTexture, true);
-        Text.Anchor = TextAnchor.MiddleCenter;
-        string label = MEMOVERFLOW
-            ? "GS_CacheWarnRAM".Translate()
-            : MemoryString(TotalUsage, MainMemory) + "/" + MemoryString(MainMemory, MainMemory);
-        Widgets.Label(barRect, label);
-        Text.Anchor = default;
-
-        if (Calculating)
+        try
         {
-            var calcLabel = $"{"GS_RecalcProcess".Translate()} ({ModData.Count}/{CurrentMods.Count()})";
-            var textSize = Text.CalcHeight(calcLabel, rect.width);
-            var textRect = new Rect(0, curY + 5, rect.width, textSize);
-            Widgets.Label(textRect, calcLabel);
-            curY = textRect.yMax;
-        }
+            Rect button = new(0, 5, rect.width * 0.20f, 22);
+            Rect bar = new(button.xMax + 5, 5, rect.width - button.width - 5, 22);
+            float currentY = button.height;
 
-        /*else if (GraphicSetter.settings.AnySettingsChanged())
-        {
-            string settingsChangedLabel = "Settings changed, recalculate to check the memory use!";
-            var textSize = Text.CalcHeight(settingsChangedLabel, rect.width);
-            Rect textRect = new Rect(0, curY + 5, rect.width, textSize);
-            Widgets.Label(textRect, settingsChangedLabel);
-            curY = textRect.yMax;
-        }
-        */
-        if (Critical)
-        {
-            Text.Font = GameFont.Small;
-            string warningLabel = "GS_CacheWarning".Translate(MEMOVERFLOW
-                ? "GS_CacheWarnOverflow".Translate()
-                : "GS_CacheWarnStruggle".Translate());
-            var textSize = Text.CalcHeight(warningLabel, rect.width);
-            var warningLabelRect = new Rect(0, curY + 5, rect.width, textSize);
-            Widgets.Label(warningLabelRect, warningLabel);
-            Text.Font = GameFont.Small;
-        }
+            string buttonText = Calculating
+                ? paused ? "GS_CacheContinue".Translate() : "GS_CacheStop".Translate()
+                : "GS_CacheRecalc".Translate();
+            bool hasTextures = currentMods.Count > 0 || SnapshotCurrentMods().Count > 0;
+            if (Widgets.ButtonText(button, buttonText, true, false, hasTextures))
+                Notify_ChangeState();
 
-        GUI.EndGroup();
+            Widgets.FillableBar(bar, DisplayUsageFraction, StaticContent.blue, Texture2D.blackTexture, true);
+            TextAnchor previousAnchor = Text.Anchor;
+            Text.Anchor = TextAnchor.MiddleCenter;
+            string label = MEMOVERFLOW
+                ? "GS_CacheWarnRAM".Translate()
+                : MemoryString(TotalUsage, MainMemory) + "/" + MemoryString(MainMemory, MainMemory);
+            Widgets.Label(bar, label);
+            Text.Anchor = previousAnchor;
+
+            if (Calculating)
+            {
+                string progressLabel = $"{"GS_RecalcProcess".Translate()} ({processedMods}/{currentMods.Count})";
+                float height = Text.CalcHeight(progressLabel, rect.width);
+                Rect progressRect = new(0, currentY + 5, rect.width, height);
+                Widgets.Label(progressRect, progressLabel);
+                currentY = progressRect.yMax;
+            }
+
+            if (Critical)
+            {
+                GameFont previousFont = Text.Font;
+                Text.Font = GameFont.Small;
+                string warning = "GS_CacheWarning".Translate(MEMOVERFLOW
+                    ? "GS_CacheWarnOverflow".Translate()
+                    : "GS_CacheWarnStruggle".Translate());
+                float height = Text.CalcHeight(warning, rect.width);
+                Widgets.Label(new Rect(0, currentY + 5, rect.width, height), warning);
+                Text.Font = previousFont;
+            }
+        }
+        finally
+        {
+            GUI.EndGroup();
+        }
     }
 }

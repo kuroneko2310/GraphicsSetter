@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Build
+        id: compile
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --nologo --verbosity normal *> build.log
+          "exit_code=$LASTEXITCODE" >> $env:GITHUB_OUTPUT
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphics-setter-build-log
+          path: build.log
+          retention-days: 3
+      - name: Fail on compiler error
+        if: steps.compile.outputs.exit_code != '0'
+        shell: pwsh
+        run: exit 1
