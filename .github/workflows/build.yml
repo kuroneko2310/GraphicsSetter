@@ -11,15 +11,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           show-progress: false
-      - name: Restore and build
+      - name: Build
         shell: pwsh
-        run: |
-          dotnet restore Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --verbosity quiet *> restore.log
-          if ($LASTEXITCODE -ne 0) {
-            Get-Content restore.log | Select-String -Pattern 'error|failed' -CaseSensitive:$false
-            exit $LASTEXITCODE
-          }
-          dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --no-restore --nologo --verbosity quiet /clp:ErrorsOnly *> build.log
-          $exitCode = $LASTEXITCODE
-          Get-Content build.log | Select-String -Pattern ': error '
-          exit $exitCode
+        run: $output = dotnet build Source/GraphicSetter/GraphicSetter/GraphicSetter.csproj --configuration Release --nologo --verbosity quiet /clp:ErrorsOnly 2>&1; $exitCode = $LASTEXITCODE; $output | Select-String -Pattern ': error '; exit $exitCode
