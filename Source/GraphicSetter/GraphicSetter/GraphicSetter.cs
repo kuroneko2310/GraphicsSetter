@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using UnityEngine;
 using Verse;
 
@@ -15,16 +15,15 @@ public class GraphicSetter : Mod
         ModRef = this;
         Log.Message("[1.6]Graphics Setter - Loaded");
         Settings = GetSettings<GraphicsSettings>();
-        //profiler = new ResourceProfiler();
+        VramBudgetManager.Reset(GraphicsSettings.mainSettings);
         var graphics = new Harmony("com.telefonmast.graphicssettings.rimworld.mod");
-
-        //Maybe obsolete?
-        //graphics.Patch(AccessTools.Constructor(typeof(PawnTextureAtlas)), transpiler: new(typeof(GraphicsPatches.PawnTextureAtlasCtorPatch).GetMethod(nameof(GraphicsPatches.PawnTextureAtlasCtorPatch.Transpiler)), Priority.First));
         graphics.PatchAll();
     }
 
     public override void WriteSettings()
     {
+        RuntimeTextureRegistry.ApplyAll(GraphicsSettings.mainSettings);
+        VramBudgetManager.Reset(GraphicsSettings.mainSettings);
         Settings.Write();
         base.WriteSettings();
     }
