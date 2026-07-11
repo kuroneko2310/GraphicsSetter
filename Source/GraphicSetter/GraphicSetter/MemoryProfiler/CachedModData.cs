@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Profiling;
 using Verse;
 
 namespace GraphicSetter;
@@ -18,7 +19,7 @@ internal class CachedModData(ModContentPack mod)
     {
         if (!texture)
             return;
-        
+
         try
         {
             var textureSize = new Vector2(texture.width, texture.height);
@@ -39,36 +40,78 @@ internal class CachedModData(ModContentPack mod)
 
     private static long EstimateTextureMemorySize(Texture2D texture)
     {
-        if (texture == null) return 0;
+        if (!texture)
+            return 0;
 
-        var textureFormat = texture.format;
-        var bytesPerPixel = textureFormat switch
+        var format = texture.format;
+        var mipCount = Math.Max(1, texture.mipmapCount);
+
+        switch (format)
         {
-            TextureFormat.RGBA32 => 4,
-            TextureFormat.ARGB32 => 4,
-            TextureFormat.RGB24 => 3,
-            TextureFormat.RGB565 => 2,
-            TextureFormat.DXT1 => 0,
-            TextureFormat.DXT5 or TextureFormat.BC7 => 0,
-            _ => 0
-        };
-        
-        if (bytesPerPixel == 0)
+            case TextureFormat.DXT1:
+            case TextureFormat.BC4:
+                return EstimateBlockCompressed(texture.width, texture.height, mipCount, 8);
+
+            case TextureFormat.DXT5:
+            case TextureFormat.BC5:
+            case TextureFormat.BC7:
+                return EstimateBlockCompressed(texture.width, texture.height, mipCount, 16);
+
+            case TextureFormat.Alpha8:
+                return EstimateUncompressed(texture.width, texture.height, mipCount, 1);
+
+            case TextureFormat.RGB565:
+            case TextureFormat.ARGB4444:
+            case TextureFormat.RGBA4444:
+                return EstimateUncompressed(texture.width, texture.height, mipCount, 2);
+
+            case TextureFormat.RGB24:
+                return EstimateUncompressed(texture.width, texture.height, mipCount, 3);
+
+            case TextureFormat.RGBA32:
+            case TextureFormat.ARGB32:
+            case TextureFormat.BGRA32:
+                return EstimateUncompressed(texture.width, texture.height, mipCount, 4);
+
+            default:
+                if (Prefs.LogVerbose)
+                    Log.Warning($"[Graphics Settings] Falling back to Unity's runtime size for unsupported texture format {format}.");
+                return Profiler.GetRuntimeMemorySizeLong(texture);
+        }
+    }
+
+    private static long EstimateBlockCompressed(int width, int height, int mipCount, int bytesPerBlock)
+    {
+        long total = 0;
+        var mipWidth = Math.Max(1, width);
+        var mipHeight = Math.Max(1, height);
+
+        for (var level = 0; level < mipCount; level++)
         {
-            return textureFormat switch
-            {
-                TextureFormat.DXT1 => (long)(texture.width * texture.height * 0.5f),
-                TextureFormat.DXT5 or TextureFormat.BC7 => texture.width * texture.height,
-                _ => throw new ArgumentOutOfRangeException($"Unknown texture format: {textureFormat}")
-            };
+            var blocksWide = Math.Max(1, (mipWidth + 3) / 4);
+            var blocksHigh = Math.Max(1, (mipHeight + 3) / 4);
+            total += (long)blocksWide * blocksHigh * bytesPerBlock;
+
+            mipWidth = Math.Max(1, mipWidth / 2);
+            mipHeight = Math.Max(1, mipHeight / 2);
         }
 
-        long baseSize = texture.width * texture.height * bytesPerPixel;
+        return total;
+    }
 
-        // Account for mipmaps (adds ~33% more memory)
-        if (texture.mipmapCount > 1) 
-            baseSize = (long)(baseSize * 1.33333f);
+    private static long EstimateUncompressed(int width, int height, int mipCount, int bytesPerPixel)
+    {
+        long total = 0;
+        var mipWidth = Math.Max(1, width);
+        var mipHeight = Math.Max(1, height);
 
-        return baseSize;
+        for (var level = 0; level < mipCount; level++)
+        {
+            total += (long)mipWidth * mipHeight * bytesPerPixel;
+            mipWidth = Math.Max(1, mipWidth / 2);
+            mipHeight = Math.Max(1, mipHeight / 2);
+        }
+
+        return total;
     }
 }
