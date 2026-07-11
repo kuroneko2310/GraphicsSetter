@@ -11,6 +11,7 @@ internal static class RuntimeTextureRegistry
         public WeakReference<Texture2D> Texture;
         public string PackageId;
         public string SourcePath;
+        public float OriginalMipMapBias;
     }
 
     private static readonly object Sync = new();
@@ -23,15 +24,30 @@ internal static class RuntimeTextureRegistry
 
         lock (Sync)
         {
-            Entries.Add(new Entry
+            for (var index = Entries.Count - 1; index >= 0; index--)
+            {
+                if (!Entries[index].Texture.TryGetTarget(out var existing) || !existing)
+                {
+                    Entries.RemoveAt(index);
+                    continue;
+                }
+
+                if (!ReferenceEquals(existing, texture))
+                    continue;
+
+                Apply(Entries[index], texture, GraphicsSettings.mainSettings);
+                return;
+            }
+
+            var entry = new Entry
             {
                 Texture = new WeakReference<Texture2D>(texture),
                 PackageId = packageId ?? string.Empty,
-                SourcePath = sourcePath ?? string.Empty
-            });
-            Apply(texture, GraphicsSettings.mainSettings);
-            if (Entries.Count % 256 == 0)
-                RemoveDeadEntries();
+                SourcePath = sourcePath ?? string.Empty,
+                OriginalMipMapBias = texture.mipMapBias
+            };
+            Entries.Add(entry);
+            Apply(entry, texture, GraphicsSettings.mainSettings);
         }
     }
 
@@ -46,7 +62,7 @@ internal static class RuntimeTextureRegistry
                     Entries.RemoveAt(index);
                     continue;
                 }
-                Apply(texture, settings);
+                Apply(Entries[index], texture, settings);
             }
         }
     }
@@ -63,15 +79,14 @@ internal static class RuntimeTextureRegistry
         }
     }
 
-    private static void Apply(Texture2D texture, SettingsGroup settings)
+    private static void Apply(Entry entry, Texture2D texture, SettingsGroup settings)
     {
         if (!texture || settings == null)
             return;
 
         texture.filterMode = settings.filterMode;
         texture.anisoLevel = Math.Max(0, Math.Min(2, settings.anisoLevel));
-        if (settings.overrideMipMapBias)
-            texture.mipMapBias = settings.mipMapBias;
+        texture.mipMapBias = settings.overrideMipMapBias ? settings.mipMapBias : entry.OriginalMipMapBias;
     }
 
     private static void RemoveDeadEntries()
