@@ -25,6 +25,7 @@ public class GraphicSetter : Mod
     public override void WriteSettings()
     {
         base.WriteSettings();
+        TextureRuntimeRegistry.ApplyCurrentSettings();
         MissileGirlIntegration.NotifyPolicyChanged();
         StaticContent.MemoryData.Notify_SettingsChanged();
     }
