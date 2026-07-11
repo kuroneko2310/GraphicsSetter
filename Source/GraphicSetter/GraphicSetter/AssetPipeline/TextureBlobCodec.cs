@@ -12,6 +12,8 @@ internal static class TextureBlobCodec
     private const int HeaderSize = 36;
     private const int FlagMipMaps = 1;
     private const int FlagLinear = 2;
+    private const int KnownFlags = FlagMipMaps | FlagLinear;
+    private const int MaximumDimension = 32768;
 
     public static byte[] Encode(Texture2D texture, bool linear)
     {
@@ -61,11 +63,20 @@ internal static class TextureBlobCodec
             var mipCount = accessor.ReadInt32(20);
             var flags = accessor.ReadInt32(24);
             var rawLength = accessor.ReadInt32(28);
-            if (width <= 0 || height <= 0 || mipCount <= 0 || rawLength <= 0 || HeaderSize + (long)rawLength > length)
+            var reserved = accessor.ReadInt32(32);
+
+            if (width <= 0 || height <= 0 || width > MaximumDimension || height > MaximumDimension ||
+                mipCount <= 0 || mipCount > GetMaximumMipCount(width, height) ||
+                rawLength <= 0 || reserved != 0 || (flags & ~KnownFlags) != 0 ||
+                ((flags & FlagMipMaps) != 0) != (mipCount > 1))
+                return false;
+
+            var expectedRawLength = GetRawLength(width, height, format, mipCount);
+            if (expectedRawLength <= 0 || expectedRawLength != rawLength || HeaderSize + expectedRawLength != length)
                 return false;
 
             linear = (flags & FlagLinear) != 0;
-            var hasMipMaps = (flags & FlagMipMaps) != 0 && mipCount > 1;
+            var hasMipMaps = mipCount > 1;
             texture = new Texture2D(width, height, format, hasMipMaps, linear);
 
             unsafe
@@ -94,5 +105,58 @@ internal static class TextureBlobCodec
             texture = null;
             return false;
         }
+    }
+
+    private static long GetRawLength(int width, int height, TextureFormat format, int mipCount)
+    {
+        long total = 0;
+        for (var level = 0; level < mipCount; level++)
+        {
+            var levelBytes = GetLevelBytes(width, height, format);
+            if (levelBytes <= 0 || total > int.MaxValue - levelBytes)
+                return -1;
+            total += levelBytes;
+            width = Math.Max(1, width / 2);
+            height = Math.Max(1, height / 2);
+        }
+        return total;
+    }
+
+    private static long GetLevelBytes(int width, int height, TextureFormat format)
+    {
+        switch (format)
+        {
+            case TextureFormat.DXT1:
+            case TextureFormat.BC4:
+                return (long)Math.Max(1, (width + 3) / 4) * Math.Max(1, (height + 3) / 4) * 8L;
+            case TextureFormat.DXT5:
+            case TextureFormat.BC5:
+            case TextureFormat.BC7:
+                return (long)Math.Max(1, (width + 3) / 4) * Math.Max(1, (height + 3) / 4) * 16L;
+            case TextureFormat.Alpha8:
+                return (long)width * height;
+            case TextureFormat.RGB565:
+            case TextureFormat.ARGB4444:
+            case TextureFormat.RGBA4444:
+                return (long)width * height * 2L;
+            case TextureFormat.RGB24:
+                return (long)width * height * 3L;
+            case TextureFormat.RGBA32:
+                return (long)width * height * 4L;
+            default:
+                return -1;
+        }
+    }
+
+    private static int GetMaximumMipCount(int width, int height)
+    {
+        var count = 1;
+        while (width > 1 || height > 1)
+        {
+            width = Math.Max(1, width / 2);
+            height = Math.Max(1, height / 2);
+            count++;
+        }
+        return count;
     }
 }
