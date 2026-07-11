@@ -42,8 +42,10 @@ internal static class TextureLoadingPatch
             {
                 bool hasMipMapsSet;
                 bool loadedFromCache = TextureBlobCache.TryLoad(file, out texture2D, out hasMipMapsSet);
-                bool loadedFromDds = false;
+                if (loadedFromCache)
+                    hasMipMapsSet = true;
 
+                bool loadedFromDds = false;
                 if (!loadedFromCache)
                 {
                     hasMipMapsSet = false;
@@ -88,7 +90,6 @@ internal static class TextureLoadingPatch
                 if (settings.overrideMipMapBias)
                     texture2D.mipMapBias = settings.mipMapBias;
 
-                // Keep the texture readable until the finalized GPU-ready bytes have been cached.
                 texture2D.Apply(!hasMipMapsSet, false);
                 if (!loadedFromCache)
                     TextureBlobCache.TryStore(file, texture2D);
