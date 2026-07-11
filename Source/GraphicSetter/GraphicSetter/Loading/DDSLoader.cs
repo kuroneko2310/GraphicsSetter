@@ -96,7 +96,7 @@ public static class DDSLoader
             dwMipMapCount = 1;
 
         var maximumMipCount = GetMaximumMipCount((int)dwWidth, (int)dwHeight);
-        if (dwMipMapCount > maximumMipCount)
+        if (dwMipMapCount > (uint)maximumMipCount)
         {
             error = $"Invalid mip count {dwMipMapCount} for {dwWidth}x{dwHeight}; maximum is {maximumMipCount}.";
             return null;
