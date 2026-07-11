@@ -11,7 +11,7 @@ namespace GraphicSetter;
 
 internal static class TexturePipeline
 {
-    public const string AlgorithmVersion = "graphicssetter-texture-pipeline-v2.2";
+    public const string AlgorithmVersion = "graphicssetter-texture-pipeline-v2.3";
 
     public static bool TryLoad(VirtualFile file, bool readable, out Texture2D texture)
     {
@@ -36,13 +36,24 @@ internal static class TexturePipeline
             if (string.IsNullOrEmpty(sourceHash)) return false;
             var profile = BuildProfile(policy, settings, isDds);
             var key = HashText(sourceHash + "|" + AlgorithmVersion + "|" + profile);
-            if (settings.enableTextureDiskCache && GagarinTextureCacheClient.TryGetBlob(key, out var blobPath) && TextureBlobCodec.TryLoad(blobPath, readable, out texture, out _, out var blobBytes))
+            var diskCacheAvailable = settings.enableTextureDiskCache && GagarinTextureCacheClient.Available;
+            if (diskCacheAvailable)
             {
-                FinalizeTexture(texture, originalFile, packageId, sourcePath);
-                TexturePipelineDiagnostics.RecordCacheHit(blobBytes);
-                return true;
+                if (GagarinTextureCacheClient.TryGetBlob(key, out var blobPath))
+                {
+                    if (TextureBlobCodec.TryLoad(blobPath, readable, out texture, out _, out var blobBytes))
+                    {
+                        FinalizeTexture(texture, originalFile, packageId, sourcePath);
+                        TexturePipelineDiagnostics.RecordCacheHit(blobBytes);
+                        return true;
+                    }
+
+                    GagarinTextureCacheClient.InvalidateSource(sourcePath);
+                }
+
+                TexturePipelineDiagnostics.RecordCacheMiss();
             }
-            TexturePipelineDiagnostics.RecordCacheMiss();
+
             var stopwatch = Stopwatch.StartNew();
             var resized = false;
             var mipless = false;
@@ -68,11 +79,22 @@ internal static class TexturePipeline
                 texture = TextureImageProcessor.Decode(originalFile, data, policy, settings, out resized, out mipless);
             }
             if (!texture) return false;
-            if (settings.enableTextureDiskCache && GagarinTextureCacheClient.Available)
+
+            if (diskCacheAvailable)
             {
-                var blob = TextureBlobCodec.Encode(texture, policy.Linear);
-                if (GagarinTextureCacheClient.StoreBlob(key, blob, sourcePath, packageId, profile)) TexturePipelineDiagnostics.RecordBlobStored(blob.LongLength);
+                try
+                {
+                    var blob = TextureBlobCodec.Encode(texture, policy.Linear);
+                    if (GagarinTextureCacheClient.StoreBlob(key, blob, sourcePath, packageId, profile))
+                        TexturePipelineDiagnostics.RecordBlobStored(blob.LongLength);
+                }
+                catch (Exception cacheException)
+                {
+                    if (settings.verboseLogging)
+                        Log.Warning($"[Graphics Settings] Could not publish the processed texture blob for '{sourcePath}'. The decoded texture will still be used.\n{cacheException}");
+                }
             }
+
             texture.Apply(false, !readable);
             FinalizeTexture(texture, originalFile, packageId, sourcePath);
             stopwatch.Stop();
@@ -91,6 +113,7 @@ internal static class TexturePipeline
     private static void FinalizeTexture(Texture2D texture, VirtualFile file, string packageId, string sourcePath)
     {
         texture.name = Path.GetFileNameWithoutExtension(file.Name);
+        VramBudgetManager.CommitTexture(texture);
         RuntimeTextureRegistry.Register(texture, packageId, sourcePath);
     }
 
