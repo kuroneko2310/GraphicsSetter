@@ -52,13 +52,28 @@ internal static class VramBudgetManager
                 estimated = EstimateRgbaBytes(targetWidth, targetHeight, useMipMaps);
             }
 
-            plannedBytes += estimated;
             return Math.Max(targetWidth, targetHeight);
+        }
+    }
+
+    public static void CommitTexture(Texture2D texture)
+    {
+        if (!texture)
+            return;
+
+        lock (Sync)
+        {
+            plannedBytes += EstimateTextureBytes(
+                texture.width,
+                texture.height,
+                texture.format,
+                Math.Max(1, texture.mipmapCount));
         }
     }
 
     private static long CalculateBudget(SettingsGroup settings)
     {
+        settings ??= new SettingsGroup();
         var detectedMb = Math.Max(0, SystemInfo.graphicsMemorySize);
         long budgetMb = settings.vramProfile switch
         {
@@ -69,6 +84,42 @@ internal static class VramBudgetManager
             _ => detectedMb > 0 ? Math.Max(512, detectedMb - Math.Max(768, detectedMb / 4)) : 2048
         };
         return budgetMb * 1024L * 1024L;
+    }
+
+    private static long EstimateTextureBytes(int width, int height, TextureFormat format, int mipCount)
+    {
+        long total = 0;
+        for (var level = 0; level < mipCount; level++)
+        {
+            total += EstimateLevelBytes(width, height, format);
+            width = Math.Max(1, width / 2);
+            height = Math.Max(1, height / 2);
+        }
+        return total;
+    }
+
+    private static long EstimateLevelBytes(int width, int height, TextureFormat format)
+    {
+        switch (format)
+        {
+            case TextureFormat.DXT1:
+            case TextureFormat.BC4:
+                return (long)Math.Max(1, (width + 3) / 4) * Math.Max(1, (height + 3) / 4) * 8L;
+            case TextureFormat.DXT5:
+            case TextureFormat.BC5:
+            case TextureFormat.BC7:
+                return (long)Math.Max(1, (width + 3) / 4) * Math.Max(1, (height + 3) / 4) * 16L;
+            case TextureFormat.Alpha8:
+                return (long)Math.Max(1, width) * Math.Max(1, height);
+            case TextureFormat.RGB565:
+            case TextureFormat.ARGB4444:
+            case TextureFormat.RGBA4444:
+                return (long)Math.Max(1, width) * Math.Max(1, height) * 2L;
+            case TextureFormat.RGB24:
+                return (long)Math.Max(1, width) * Math.Max(1, height) * 3L;
+            default:
+                return (long)Math.Max(1, width) * Math.Max(1, height) * 4L;
+        }
     }
 
     private static long EstimateRgbaBytes(int width, int height, bool mipMaps)
