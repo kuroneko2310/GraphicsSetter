@@ -68,7 +68,6 @@ internal static class TextureLoadingPatch
                         return false;
                     }
 
-                    // LoadImage has populated the base level. Apply below may build the requested mip chain.
                     rawMipDataFinalized = !generateMipMaps;
                 }
 
@@ -90,13 +89,11 @@ internal static class TextureLoadingPatch
                         texture2D.Compress(true);
                 }
 
-                texture2D.filterMode = texture2D.mipmapCount > 1 ? FilterMode.Trilinear : FilterMode.Bilinear;
-                if (settings.overrideMipMapBias)
-                    texture2D.mipMapBias = settings.mipMapBias;
-
                 texture2D.Apply(!rawMipDataFinalized, false);
                 if (!loadedFromCache)
                     TextureBlobCache.TryStore(file, texture2D);
+
+                TextureRuntimeRegistry.RegisterAndApply(texture2D);
                 if (!readable)
                     texture2D.Apply(false, true);
 
