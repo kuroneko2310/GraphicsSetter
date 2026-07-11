@@ -37,4 +37,27 @@ internal static class MissileGirlIntegration
                 Log.Warning($"[Graphics Settings] MissileGirl integration failed: {exception}");
         }
     }
+
+    public static bool TryGetTextureCacheFolder(out string folder)
+    {
+        folder = null;
+        if (!GraphicsSettings.mainSettings.enableMissileGirlIntegration || !IsAvailable)
+            return false;
+
+        try
+        {
+            NotifyPolicyChanged();
+            Type bridgeType = Type.GetType(BridgeTypeName, false);
+            MethodInfo method = bridgeType?.GetMethod("GetTextureCacheFolder",
+                BindingFlags.Public | BindingFlags.Static);
+            folder = method?.Invoke(null, null) as string;
+            return !folder.NullOrEmpty();
+        }
+        catch (Exception exception)
+        {
+            if (GraphicsSettings.mainSettings.verboseLogging)
+                Log.Warning($"[Graphics Settings] Could not access MissileGirl texture cache: {exception}");
+            return false;
+        }
+    }
 }
