@@ -190,7 +190,7 @@ public class MemoryData
         if (Widgets.ButtonText(buttons, text, true, false, true)) Notify_ChangeState();
         Widgets.FillableBar(barRect, Mathf.Clamp01(TotalPctUsage), StaticContent.blue, Texture2D.blackTexture, true);
         Text.Anchor = TextAnchor.MiddleCenter;
-        Widgets.Label(barRect, MEMOVERFLOW ? "GS_CacheWarnRAM".Translate() : MemoryString(TotalUsage) + "/" + MemoryString(MainMemory));
+        Widgets.Label(barRect, MEMOVERFLOW ? "GS_CacheWarnRAM".Translate().ToString() : MemoryString(TotalUsage) + "/" + MemoryString(MainMemory));
         Text.Anchor = TextAnchor.UpperLeft;
         var y = barRect.yMax + 5f;
         if (Calculating)
