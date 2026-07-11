@@ -10,6 +10,8 @@ internal static class TextureResizer
     {
         if (!texture || maxDimension <= 0 || (texture.width <= maxDimension && texture.height <= maxDimension))
             return false;
+        if (!texture.isReadable)
+            return false;
 
         int targetWidth;
         int targetHeight;
@@ -24,15 +26,23 @@ internal static class TextureResizer
             targetWidth = Math.Max(1, Mathf.RoundToInt(texture.width * (maxDimension / (float)texture.height)));
         }
 
+        targetWidth = NormalizeBlockDimension(targetWidth, maxDimension);
+        targetHeight = NormalizeBlockDimension(targetHeight, maxDimension);
+
         RenderTexture temporary = null;
         RenderTexture previous = RenderTexture.active;
         Texture2D replacement = null;
 
         try
         {
+            // LoadRawTextureData does not upload DDS bytes until Apply is called. Blitting before
+            // this point can silently produce an empty or stale resized texture.
+            texture.Apply(false, false);
+
             temporary = RenderTexture.GetTemporary(targetWidth, targetHeight, 0, RenderTextureFormat.ARGB32,
                 RenderTextureReadWrite.Default);
             temporary.filterMode = FilterMode.Bilinear;
+            temporary.wrapMode = texture.wrapMode;
             Graphics.Blit(texture, temporary);
             RenderTexture.active = temporary;
 
@@ -43,6 +53,7 @@ internal static class TextureResizer
             replacement.filterMode = texture.filterMode;
             replacement.wrapMode = texture.wrapMode;
             replacement.anisoLevel = texture.anisoLevel;
+            replacement.mipMapBias = texture.mipMapBias;
 
             Object.DestroyImmediate(texture);
             texture = replacement;
@@ -61,5 +72,16 @@ internal static class TextureResizer
             if (temporary)
                 RenderTexture.ReleaseTemporary(temporary);
         }
+    }
+
+    private static int NormalizeBlockDimension(int value, int maximum)
+    {
+        if (value < 4)
+            return value;
+
+        int normalized = value - value % 4;
+        if (normalized < 4)
+            normalized = 4;
+        return Math.Min(maximum, normalized);
     }
 }
