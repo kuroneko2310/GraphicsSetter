@@ -40,6 +40,7 @@ internal static class TextureLoadingPatch
 
             try
             {
+                bool linearTexture = TexturePolicy.IsDataTexture(file);
                 bool rawMipDataFinalized;
                 bool loadedFromCache = TextureBlobCache.TryLoad(file, out texture2D, out rawMipDataFinalized);
                 if (loadedFromCache)
@@ -50,7 +51,8 @@ internal static class TextureLoadingPatch
                 {
                     rawMipDataFinalized = false;
                     loadedFromDds = settings.enableDDSLoading
-                                    && DDSHelper.TryLoadDDS(file, ref rawMipDataFinalized, ref texture2D);
+                                    && DDSHelper.TryLoadDDS(file, ref rawMipDataFinalized, ref linearTexture,
+                                        ref texture2D);
                 }
 
                 if (!texture2D && file.Exists)
@@ -60,7 +62,7 @@ internal static class TextureLoadingPatch
                     if (ImageHeaderUtility.TryReadPngDimensions(data, out int width, out int height))
                         generateMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, width, height);
 
-                    texture2D = new Texture2D(2, 2, TextureFormat.Alpha8, generateMipMaps);
+                    texture2D = new Texture2D(2, 2, TextureFormat.Alpha8, generateMipMaps, linearTexture);
                     if (!texture2D.LoadImage(data))
                     {
                         Object.DestroyImmediate(texture2D);
@@ -82,7 +84,7 @@ internal static class TextureLoadingPatch
                     int maxDimension = TexturePolicy.ResolveMaxTextureDimension(file);
                     bool generateResizedMipMaps = TexturePolicy.ShouldGenerateMipMaps(file, texture2D.width,
                         texture2D.height);
-                    if (TextureResizer.TryResize(ref texture2D, maxDimension, generateResizedMipMaps))
+                    if (TextureResizer.TryResize(ref texture2D, maxDimension, generateResizedMipMaps, linearTexture))
                         rawMipDataFinalized = true;
 
                     if (!loadedFromDds && Prefs.TextureCompression && CanCompressSafely(file, texture2D))
@@ -91,7 +93,7 @@ internal static class TextureLoadingPatch
 
                 texture2D.Apply(!rawMipDataFinalized, false);
                 if (!loadedFromCache)
-                    TextureBlobCache.TryStore(file, texture2D);
+                    TextureBlobCache.TryStore(file, texture2D, linearTexture);
 
                 TextureRuntimeRegistry.RegisterAndApply(texture2D);
                 if (!readable)
