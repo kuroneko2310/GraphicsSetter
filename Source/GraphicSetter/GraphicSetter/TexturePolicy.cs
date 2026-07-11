@@ -26,6 +26,27 @@ internal static class TexturePolicy
         "/Icons/"
     };
 
+    private static readonly string[] DataTexturePathMarkers =
+    {
+        "/Masks/",
+        "/Mask/",
+        "/Normals/",
+        "/NormalMaps/",
+        "/DataTextures/"
+    };
+
+    private static readonly string[] DataTextureNameSuffixes =
+    {
+        "_mask",
+        "_normal",
+        "_norm",
+        "_spec",
+        "_specular",
+        "_metallic",
+        "_roughness",
+        "_ao"
+    };
+
     public static int DetectedVramMb => Math.Max(0, SystemInfo.graphicsMemorySize);
 
     public static int EffectiveBudgetMb
@@ -49,9 +70,10 @@ internal static class TexturePolicy
     public static bool ShouldGenerateMipMaps(VirtualFile file, int width, int height)
     {
         SettingsGroup settings = GraphicsSettings.mainSettings;
+        if (IsDataTexture(file))
+            return true;
         if (!settings.disableMipMapsForSmallTextures)
             return true;
-
         if (IsInterfaceTexture(file))
             return false;
 
@@ -61,7 +83,7 @@ internal static class TexturePolicy
     public static int ResolveMaxTextureDimension(VirtualFile file)
     {
         SettingsGroup settings = GraphicsSettings.mainSettings;
-        if (!settings.enableAdaptiveTextureBudget || IsInterfaceTexture(file))
+        if (!settings.enableAdaptiveTextureBudget || IsInterfaceTexture(file) || IsDataTexture(file))
             return 0;
 
         if (settings.maxTextureSize > 0)
@@ -77,14 +99,35 @@ internal static class TexturePolicy
 
     public static bool IsInterfaceTexture(VirtualFile file)
     {
-        string path = file?.FullPath;
-        if (string.IsNullOrEmpty(path))
+        string path = NormalizePath(file?.FullPath);
+        if (path.Length == 0)
             return false;
 
-        path = path.Replace('\\', '/');
         foreach (string marker in FullResolutionPathMarkers)
         {
             if (path.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    public static bool IsDataTexture(VirtualFile file)
+    {
+        string path = NormalizePath(file?.FullPath);
+        if (path.Length == 0)
+            return false;
+
+        foreach (string marker in DataTexturePathMarkers)
+        {
+            if (path.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        string fileName = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+        foreach (string suffix in DataTextureNameSuffixes)
+        {
+            if (fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
 
@@ -95,7 +138,7 @@ internal static class TexturePolicy
     {
         SettingsGroup settings = GraphicsSettings.mainSettings;
         string raw = string.Join("|",
-            "graphics-setter-policy-v2",
+            "graphics-setter-policy-v3",
             settings.enableDDSLoading,
             settings.enableAdaptiveTextureBudget,
             settings.vramBudgetMode,
@@ -108,6 +151,8 @@ internal static class TexturePolicy
         byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(raw));
         return BitConverter.ToString(bytes).Replace("-", string.Empty);
     }
+
+    private static string NormalizePath(string path) => (path ?? string.Empty).Replace('\\', '/');
 
     private static float AutoBudgetFraction(int detectedVramMb)
     {
